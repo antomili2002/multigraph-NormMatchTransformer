@@ -29,7 +29,6 @@ lr_schedules = {
     "minirun": (1, (10,), 1.0),
 }
 
-
 def train_eval_model(model, criterion, optimizer, dataloader, num_epochs, resume=False, start_epoch=0):
     print("Start training...")
 
