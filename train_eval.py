@@ -2,6 +2,8 @@ import torch
 import torch.optim as optim
 import wandb
 
+from torch.utils.data import DataLoader, Subset
+from sklearn.model_selection import train_test_split
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 import time
@@ -11,6 +13,7 @@ import os
 from data.data_loader_multigraph import GMDataset, get_dataloader
 from utils.evaluation_metric import matching_accuracy_from_lists, f1_score, get_pos_neg_from_lists, make_perm_mat_pred
 import eval
+import validate
 from matchAR import Net
 from utils.config import cfg
 from utils.utils import update_params_from_cmdline
@@ -23,17 +26,24 @@ class HammingLoss(torch.nn.Module):
 
 lr_schedules = {
     #TODO: CHANGE BACK TO 10
-    "long_halving": (10, (2, 4, 6, 8, 10), 0.5),
+    "long_halving": (20, tuple(x for x in range(1,20) if x%2==0), 0.5),
     "short_halving": (2, (1,), 0.5),
     "long_nodrop": (10, (10,), 1.0),
     "minirun": (1, (10,), 1.0),
 }
 
+def train_val_dataset(dataset, val_split=0.1):
+    train_idx, val_idx = train_test_split(list(range(len(dataset))), test_size=val_split)
+    datasets = {}
+    datasets['train'] = Subset(dataset, train_idx)
+    datasets['val'] = Subset(dataset, val_idx)
+    return datasets['train'], datasets['val']
+
 def train_eval_model(model, criterion, optimizer, dataloader, num_epochs, resume=False, start_epoch=0):
     print("Start training...")
 
     since = time.time()
-    dataloader["train"].dataset.set_num_graphs(cfg.TRAIN.num_graphs_in_matching_instance)
+    dataloader["train"].dataset.dataset.set_num_graphs(cfg.TRAIN.num_graphs_in_matching_instance)
     dataset_size = len(dataloader["train"].dataset)
 
 
@@ -182,16 +192,34 @@ def train_eval_model(model, criterion, optimizer, dataloader, num_epochs, resume
                 epoch, epoch_loss, epoch_acc, epoch_f1
             )
         )
-        print()
 
+        print()
+        # Val in each epoch
+        accs, f1_scores, val_loss = validate.validate_model(model,dataloader['valid'],criterion)
+        # acc_dict = {
+        #     "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.classes, accs)
+        # }
+        # f1_dict = {
+        #     "f1_{}".format(cls): single_f1_score
+        #     for cls, single_f1_score in zip(dataloader["train"].dataset.classes, f1_scores)
+        # }
+
+        wandb.log({"ep_valid_loss": val_loss, "ep_valid_acc": torch.mean(accs), "ep_valid_f1": torch.mean(f1_scores)})
+        print(
+            "Over whole epoch {:<4} Val -------- Loss: {:.4f} Accuracy: {:.3f} F1: {:.3f}".format(
+                epoch, val_loss, torch.mean(accs), torch.mean(f1_scores)
+            )
+        )
+
+        print()
         # Eval in each epoch
         accs, f1_scores = eval.eval_model(model, dataloader["test"])
         acc_dict = {
-            "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.classes, accs)
+            "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.dataset.classes, accs)
         }
         f1_dict = {
             "f1_{}".format(cls): single_f1_score
-            for cls, single_f1_score in zip(dataloader["train"].dataset.classes, f1_scores)
+            for cls, single_f1_score in zip(dataloader["train"].dataset.dataset.classes, f1_scores)
         }
         acc_dict.update(f1_dict)
         acc_dict["matching_accuracy"] = torch.mean(accs)
@@ -260,7 +288,19 @@ if __name__ == "__main__":
     image_dataset = {
         x: GMDataset(cfg.DATASET_NAME, sets=x, length=dataset_len[x], obj_resize=(256, 256)) for x in ("train", "test")
     }
-    dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test")) for x in ("train", "test")}
+    # dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test")) for x in ("train", "test")}
+
+    trainval_dataset = image_dataset["train"]
+    # validation_size = 0.1  # 10% of the data will be used for validation
+    # val_size = int(validation_size * len(trainval_dataset))
+    # train_size = len(trainval_dataset) - val_size
+    # train_dataset, val_dataset = torch.utils.data.random_split(trainval_dataset, [0.9, 0.1])
+
+
+    train_dataset, val_dataset = train_val_dataset(image_dataset["train"], val_split=0.1)
+    image_dataset["train"] = train_dataset
+    image_dataset["valid"] = val_dataset
+    dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test" or "valid")) for x in ("train", "valid", "test")}
 
     torch.cuda.set_device(1)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -289,7 +329,8 @@ if __name__ == "__main__":
     num_epochs, _, __ = lr_schedules[cfg.TRAIN.lr_schedule]
     model, accs = train_eval_model(model, 
                                    criterion, 
-                                   optimizer,dataloader, 
+                                   optimizer,
+                                   dataloader, 
                                    num_epochs=num_epochs,
                                    resume=cfg.warmstart_path is not None, 
                                    start_epoch=0,

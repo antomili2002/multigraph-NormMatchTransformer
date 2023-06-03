@@ -1,7 +1,7 @@
 """Graph matching config system."""
 
 import os
-from easydict import EasyDict as edict
+from easydict import EasyDict as edict 
 
 __C = edict()
 # Consumers can get config by:
@@ -13,9 +13,9 @@ __C.combine_classes = False
 # VOC2011-Keypoint Dataset
 # TODO: Hard-coded to absolute paths for debugging. Normal when running the code
 __C.VOC2011 = edict()
-__C.VOC2011.KPT_ANNO_DIR = "/home/ayadav/bbgm_backbone/data/downloaded/PascalVOC/annotations/"  # keypoint annotation
-__C.VOC2011.ROOT_DIR = "/home/ayadav/bbgm_backbone/data/downloaded/PascalVOC/VOC2011/"  # original VOC2011 dataset
-__C.VOC2011.SET_SPLIT = "/home/ayadav/bbgm_backbone/data/split/voc2011_pairs.npz"  # set split path
+__C.VOC2011.KPT_ANNO_DIR = "/home/ayadav/deep-graph-matching-transformers/data/downloaded/PascalVOC/annotations/"  # keypoint annotation
+__C.VOC2011.ROOT_DIR = "/home/ayadav/deep-graph-matching-transformers/data/downloaded/PascalVOC/VOC2011/"  # original VOC2011 dataset
+__C.VOC2011.SET_SPLIT = "/home/ayadav/deep-graph-matching-transformers/data/split/voc2011_pairs.npz"  # set split path
 __C.VOC2011.CLASSES = [
     "aeroplane",
     "bicycle",
