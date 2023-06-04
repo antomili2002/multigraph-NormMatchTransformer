@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch_geometric.utils import to_dense_batch
 
 
+
 import utils.backbone
 # from BB_GM.affinity_layer import InnerProductWithWeightsAffinity
 from matchAR.sconv_archs import SConv
@@ -41,22 +42,18 @@ def make_queries(h_s, h_t):
 class Net(utils.backbone.VGG16_bn):
     def __init__(self):
         super(Net, self).__init__()
-        self.psi = SConv(input_features=1024, output_features=256)
-        self.mlp = MLPQuery(256, 1024, 256, batch_norm=False)
+        self.psi = SConv(input_features=cfg.SPLINE_CNN.input_features, output_features=cfg.SPLINE_CNN.output_features)
+        self.mlp = MLPQuery(cfg.SPLINE_CNN.output_features, 1024, cfg.Matching_TF.d_model, batch_norm=cfg.Matching_TF.batch_norm)
 
-        self.s_enc = nn.Parameter(torch.randn(256))
-        self.t_enc = nn.Parameter(torch.randn(256))
+        self.s_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
+        self.t_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
 
-        self.transformer = nn.Transformer(d_model= 256,
-                                          nhead=4, 
-                                          num_encoder_layers=4, 
-                                          num_decoder_layers=4,
+        self.transformer = nn.Transformer(d_model= cfg.Matching_TF.d_model,
+                                          nhead= cfg.Matching_TF.n_head, 
+                                          num_encoder_layers=cfg.Matching_TF.n_encoder, 
+                                          num_decoder_layers=cfg.Matching_TF.n_decoder,
                                           batch_first=True)
-        self.mlp_out = MLP([256, 256], 1, batch_norm=False)
-        # self.message_pass_node_features = SiameseSConvOnNodes(input_node_dim=1024)
-        # self.build_edge_features_from_node_features = SiameseNodeFeaturesToEdgeFeatures(
-        #     total_num_nodes=self.message_pass_node_features.num_node_features
-        # )
+        self.mlp_out = MLP([cfg.Matching_TF.d_model, cfg.Matching_TF.d_model], 1, batch_norm=cfg.Matching_TF.batch_norm)
         self.global_state_dim = 1024
 
     def forward(
@@ -107,10 +104,10 @@ class Net(utils.backbone.VGG16_bn):
         query_mask = ~(s_mask.view(B, N_s, 1) & t_mask.view(B, 1, N_t))
         query_mask = query_mask.view(B, -1)
         
-        input = torch.cat((h_s, h_t), dim=1)
+        input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
         # print('in_transformer: ', input.size())
 
-        queries = make_queries(h_s , h_t)
+        queries = make_queries(h_s, h_t)
         # print('queries: ', queries.size())
         queries = self.mlp(queries)
         # print('mlp out: ', queries.size())

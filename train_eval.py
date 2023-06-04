@@ -14,7 +14,7 @@ from data.data_loader_multigraph import GMDataset, get_dataloader
 from utils.evaluation_metric import matching_accuracy_from_lists, f1_score, get_pos_neg_from_lists, make_perm_mat_pred
 import eval
 import validate
-from matchAR import Net
+from matchAR import Net, SimpleNet
 from utils.config import cfg
 from utils.utils import update_params_from_cmdline
 
@@ -26,7 +26,8 @@ class HammingLoss(torch.nn.Module):
 
 lr_schedules = {
     #TODO: CHANGE BACK TO 10
-    "long_halving": (20, tuple(x for x in range(1,20) if x%2==0), 0.5),
+    "long_halving": (10, (2, 4, 6, 8, 10), 0.5),
+    # "long_halving": (50, (2, 4, 6, 8, 10, 12, 18, 20, 30, 40, 45, 50), 0.5),
     "short_halving": (2, (1,), 0.5),
     "long_nodrop": (10, (10,), 1.0),
     "minirun": (1, (10,), 1.0),
@@ -43,12 +44,12 @@ def train_eval_model(model, criterion, optimizer, dataloader, num_epochs, resume
     print("Start training...")
 
     since = time.time()
-    dataloader["train"].dataset.dataset.set_num_graphs(cfg.TRAIN.num_graphs_in_matching_instance)
+    dataloader["train"].dataset.set_num_graphs(cfg.TRAIN.num_graphs_in_matching_instance)
     dataset_size = len(dataloader["train"].dataset)
 
 
     device = next(model.parameters()).device
-    print("model on device: {}".format(device))
+    print("{} model on device: {}".format(cfg.MODEL_ARCH , device))
 
     checkpoint_path = Path(cfg.model_dir) / "params"
     if not checkpoint_path.exists():
@@ -195,31 +196,23 @@ def train_eval_model(model, criterion, optimizer, dataloader, num_epochs, resume
 
         print()
         # Val in each epoch
-        accs, f1_scores, val_loss = validate.validate_model(model,dataloader['valid'],criterion)
-        # acc_dict = {
-        #     "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.classes, accs)
-        # }
-        # f1_dict = {
-        #     "f1_{}".format(cls): single_f1_score
-        #     for cls, single_f1_score in zip(dataloader["train"].dataset.classes, f1_scores)
-        # }
-
-        wandb.log({"ep_valid_loss": val_loss, "ep_valid_acc": torch.mean(accs), "ep_valid_f1": torch.mean(f1_scores)})
-        print(
-            "Over whole epoch {:<4} Val -------- Loss: {:.4f} Accuracy: {:.3f} F1: {:.3f}".format(
-                epoch, val_loss, torch.mean(accs), torch.mean(f1_scores)
-            )
-        )
+        # accs, f1_scores, val_loss = validate.validate_model(model,dataloader['valid'],criterion)
+        # wandb.log({"ep_valid_loss": val_loss, "ep_valid_acc": torch.mean(accs), "ep_valid_f1": torch.mean(f1_scores)})
+        # print(
+        #     "Over whole epoch {:<4} Val -------- Loss: {:.4f} Accuracy: {:.3f} F1: {:.3f}".format(
+        #         epoch, val_loss, torch.mean(accs), torch.mean(f1_scores)
+        #     )
+        # )
 
         print()
         # Eval in each epoch
         accs, f1_scores = eval.eval_model(model, dataloader["test"])
         acc_dict = {
-            "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.dataset.classes, accs)
+            "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.classes, accs)
         }
         f1_dict = {
             "f1_{}".format(cls): single_f1_score
-            for cls, single_f1_score in zip(dataloader["train"].dataset.dataset.classes, f1_scores)
+            for cls, single_f1_score in zip(dataloader["train"].dataset.classes, f1_scores)
         }
         acc_dict.update(f1_dict)
         acc_dict["matching_accuracy"] = torch.mean(accs)
@@ -235,24 +228,6 @@ def train_eval_model(model, criterion, optimizer, dataloader, num_epochs, resume
             time_elapsed // 3600, (time_elapsed // 60) % 60, time_elapsed % 60
         )
     )
-
-    # wandb logging
-    # train_iter_loss_log = [[x,y] for (x,y) in zip(train_iter_loss, train_iter)]
-    # table = wandb.Table(data=train_iter_loss_log, columns = ["train_loss", "Iterations"])
-    # wandb.log(
-    #     {"iter_train_loss" : wandb.plot.line(table, "Iterations", "train_loss",
-    #         title="Train Loss")})
-    # log_acc = [[x,y] for (x,y) in zip(mean_accs_epoch, epoch_list)]
-    # acc_table = wandb.Table(data=log_acc, columns = ["test_acc", "Iterations"])
-    # wandb.log(
-    #     {"test_acc" : wandb.plot.line(table, "Iterations", "test_acc",
-    #         title="Test Accuracy")})
-    
-    # log_acc = [[x,y] for (x,y) in zip(mean_f1_epoch, epoch_list)]
-    # f1_table = wandb.Table(data=log_acc, columns = ["test_f1", "Iterations"])
-    # wandb.log(
-    #     {"test_f1" : wandb.plot.line(table, "Iterations", "test_f1",
-    #         title="Test F1-score")})
 
     return model, acc_dict
 
@@ -288,25 +263,29 @@ if __name__ == "__main__":
     image_dataset = {
         x: GMDataset(cfg.DATASET_NAME, sets=x, length=dataset_len[x], obj_resize=(256, 256)) for x in ("train", "test")
     }
-    # dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test")) for x in ("train", "test")}
+    dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test")) for x in ("train", "test")}
 
-    trainval_dataset = image_dataset["train"]
-    # validation_size = 0.1  # 10% of the data will be used for validation
-    # val_size = int(validation_size * len(trainval_dataset))
-    # train_size = len(trainval_dataset) - val_size
-    # train_dataset, val_dataset = torch.utils.data.random_split(trainval_dataset, [0.9, 0.1])
+    # trainval_dataset = image_dataset["train"]
+    # # validation_size = 0.1  # 10% of the data will be used for validation
+    # # val_size = int(validation_size * len(trainval_dataset))
+    # # train_size = len(trainval_dataset) - val_size
+    # # train_dataset, val_dataset = torch.utils.data.random_split(trainval_dataset, [0.9, 0.1])
 
 
-    train_dataset, val_dataset = train_val_dataset(image_dataset["train"], val_split=0.1)
-    image_dataset["train"] = train_dataset
-    image_dataset["valid"] = val_dataset
-    dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test" or "valid")) for x in ("train", "valid", "test")}
+    # train_dataset, val_dataset = train_val_dataset(image_dataset["train"], val_split=0.1)
+    # image_dataset["train"] = train_dataset
+    # image_dataset["valid"] = val_dataset
+    # dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test" or "valid")) for x in ("train", "valid", "test")}
 
     torch.cuda.set_device(1)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = Net()
-    model = model.cuda()
+    if cfg.MODEL_ARCH == 'tf':
+        model = Net()
+        model = model.cuda()
+    else:
+        model = SimpleNet()
+        model = model.cuda()
 
 
     criterion = torch.nn.BCEWithLogitsLoss()
