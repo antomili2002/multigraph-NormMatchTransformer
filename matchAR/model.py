@@ -7,6 +7,7 @@ from torch_geometric.utils import to_dense_batch
 import utils.backbone
 # from BB_GM.affinity_layer import InnerProductWithWeightsAffinity
 from matchAR.sconv_archs import SConv
+from matchAR.positionalEmbedding import PositionalEncoding
 # from lpmp_py import GraphMatchingModule
 # from lpmp_py import MultiGraphMatchingModule
 from utils.config import cfg
@@ -42,18 +43,22 @@ def make_queries(h_s, h_t):
 class Net(utils.backbone.VGG16_bn):
     def __init__(self):
         super(Net, self).__init__()
-        self.psi = SConv(input_features=cfg.SPLINE_CNN.input_features, output_features=cfg.SPLINE_CNN.output_features)
-        self.mlp = MLPQuery(cfg.SPLINE_CNN.output_features, 1024, cfg.Matching_TF.d_model, batch_norm=cfg.Matching_TF.batch_norm)
+        self.model_name = 'Transformer'
+        self.psi = SConv(input_features=cfg.SPLINE_CNN.input_features, output_features=cfg.Matching_TF.d_model)
+        self.mlp = MLPQuery(cfg.Matching_TF.d_model, 1024, cfg.Matching_TF.d_model, batch_norm=cfg.Matching_TF.batch_norm)
+        self.glob_to_node_dim = nn.Linear(512, cfg.Matching_TF.d_model)
 
-        self.s_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
-        self.t_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
+        # self.s_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
+        # self.t_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
 
+        # self.positional_encoding = PositionalEncoding(d_model, max_seq_len)
         self.transformer = nn.Transformer(d_model= cfg.Matching_TF.d_model,
                                           nhead= cfg.Matching_TF.n_head, 
                                           num_encoder_layers=cfg.Matching_TF.n_encoder, 
                                           num_decoder_layers=cfg.Matching_TF.n_decoder,
                                           batch_first=True)
-        self.mlp_out = MLP([cfg.Matching_TF.d_model, cfg.Matching_TF.d_model], 1, batch_norm=cfg.Matching_TF.batch_norm)
+        # self.mlp_out = MLP([cfg.Matching_TF.d_model, cfg.Matching_TF.d_model], 1, batch_norm=cfg.Matching_TF.batch_norm)
+        self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024, 512, 256], 1, batch_norm=False)
         self.global_state_dim = 1024
 
     def forward(
@@ -78,6 +83,7 @@ class Net(utils.backbone.VGG16_bn):
 
             # TODO: Global VGG vector
             # global_list.append(self.final_layers(edges)[0].reshape((nodes.shape[0], -1)))
+            
             nodes = normalize_over_channels(nodes)
             edges = normalize_over_channels(edges)
 
@@ -91,6 +97,12 @@ class Net(utils.backbone.VGG16_bn):
             graph.x = node_features
             h = self.psi(graph)
             (h, mask) = to_dense_batch(h, graph.batch, fill_value=0)
+            
+            if cfg.Matching_TF.global_feat:
+                global_feature = self.final_layers(edges)[0].reshape((nodes.shape[0], -1))
+                global_feature = self.glob_to_node_dim(global_feature)
+                global_feature = global_feature.unsqueeze(1).expand(-1, h.size(1), -1)
+                h = h + global_feature
 
             orig_graph_list.append((h,mask))
 
@@ -104,7 +116,7 @@ class Net(utils.backbone.VGG16_bn):
         query_mask = ~(s_mask.view(B, N_s, 1) & t_mask.view(B, 1, N_t))
         query_mask = query_mask.view(B, -1)
         
-        input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
+        input = torch.cat((h_s, h_t), dim=1)
         # print('in_transformer: ', input.size())
 
         queries = make_queries(h_s, h_t)
@@ -121,84 +133,6 @@ class Net(utils.backbone.VGG16_bn):
         # print('output: ', output.size())
 
         return output.squeeze(2)
-"""
-            graph = self.message_pass_node_features(graph)
-            orig_graph = self.build_edge_features_from_node_features(graph)
-            orig_graph_list.append(orig_graph)
-
-
-
-        global_weights_list = [
-            torch.cat([global_src, global_tgt], axis=-1) for global_src, global_tgt in lexico_iter(global_list)
-        ]
-        global_weights_list = [normalize_over_channels(g) for g in global_weights_list]
-
-        unary_costs_list = [
-            self.vertex_affinity([item.x for item in g_1], [item.x for item in g_2], global_weights)
-            for (g_1, g_2), global_weights in zip(lexico_iter(orig_graph_list), global_weights_list)
-        ]
-
-        # Similarities to costs
-        unary_costs_list = [[-x for x in unary_costs] for unary_costs in unary_costs_list]
-
-        if self.training:
-            unary_costs_list = [
-                [
-                    x + 1.0*gt[:dim_src, :dim_tgt]  # Add margin with alpha = 1.0
-                    for x, gt, dim_src, dim_tgt in zip(unary_costs, perm_mat, ns_src, ns_tgt)
-                ]
-                for unary_costs, perm_mat, (ns_src, ns_tgt) in zip(unary_costs_list, perm_mats, lexico_iter(n_points))
-            ]
-
-        quadratic_costs_list = [
-            self.edge_affinity([item.edge_attr for item in g_1], [item.edge_attr for item in g_2], global_weights)
-            for (g_1, g_2), global_weights in zip(lexico_iter(orig_graph_list), global_weights_list)
-        ]
-
-        # Aimilarities to costs
-        quadratic_costs_list = [[-0.5 * x for x in quadratic_costs] for quadratic_costs in quadratic_costs_list]
-
-        if cfg.BB_GM.solver_name == "lpmp":
-            all_edges = [[item.edge_index for item in graph] for graph in orig_graph_list]
-            gm_solvers = [
-                GraphMatchingModule(
-                    all_left_edges,
-                    all_right_edges,
-                    ns_src,
-                    ns_tgt,
-                    cfg.BB_GM.lambda_val,
-                    cfg.BB_GM.solver_params,
-                )
-                for (all_left_edges, all_right_edges), (ns_src, ns_tgt) in zip(
-                    lexico_iter(all_edges), lexico_iter(n_points)
-                )
-            ]
-            matchings = [
-                gm_solver(unary_costs, quadratic_costs)
-                for gm_solver, unary_costs, quadratic_costs in zip(gm_solvers, unary_costs_list, quadratic_costs_list)
-            ]
-        elif cfg.BB_GM.solver_name == "multigraph":
-            all_edges = [[item.edge_index for item in graph] for graph in orig_graph_list]
-            gm_solver = MultiGraphMatchingModule(
-                all_edges, n_points, cfg.BB_GM.lambda_val, cfg.BB_GM.solver_params)
-            matchings = gm_solver(unary_costs_list, quadratic_costs_list)
-        else:
-            raise ValueError(f"Unknown solver {cfg.BB_GM.solver_name}")
-
-        if visualize_flag:
-            easy_visualize(
-                orig_graph_list,
-                points,
-                n_points,
-                images,
-                unary_costs_list,
-                quadratic_costs_list,
-                matchings,
-                **visualization_params,
-            )
-
-        return graph
-""" 
 
 
 class MLP(nn.Module):

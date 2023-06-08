@@ -13,9 +13,10 @@
   "Matching_TF": {
     "n_head": 4,
     "n_encoder": 4,
-    "n_decoder": 6,
+    "n_decoder": 4,
     "d_model": 256,
-    "batch_norm": false
+    "batch_norm": false,
+    "global_feat": false
   },
   "train_sampling": "intersection",
   "eval_sampling": "intersection",
@@ -24,7 +25,7 @@
   "warmstart_path": null,
   "TRAIN": {
     "EPOCH_ITERS": 2000,
-    "LR": 0.0002,
+    "LR": 0.0001,
     "lr_schedule": "long_halving",
     "num_graphs_in_matching_instance": 2
   },

@@ -13,7 +13,6 @@ import os
 from data.data_loader_multigraph import GMDataset, get_dataloader
 from utils.evaluation_metric import matching_accuracy_from_lists, f1_score, get_pos_neg_from_lists, make_perm_mat_pred
 import eval
-import validate
 from matchAR import Net, SimpleNet
 from utils.config import cfg
 from utils.utils import update_params_from_cmdline
@@ -26,8 +25,8 @@ class HammingLoss(torch.nn.Module):
 
 lr_schedules = {
     #TODO: CHANGE BACK TO 10
-    "long_halving": (10, (2, 4, 6, 8, 10), 0.5),
-    # "long_halving": (50, (2, 4, 6, 8, 10, 12, 18, 20, 30, 40, 45, 50), 0.5),
+    "long_halving": (30, (2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30), 0.5),
+    # "long_halving": (20, (2, 4, 15, 17, 20), 0.1),
     "short_halving": (2, (1,), 0.5),
     "long_nodrop": (10, (10,), 1.0),
     "minirun": (1, (10,), 1.0),
@@ -138,6 +137,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, num_epochs, resume
                 loss.backward()
                 optimizer.step()
 
+                if epoch == 2:
+                    print("here for debugging")
                 # train metrics
                 C = - s_pred_list.view(num_graphs, num_nodes_s, num_nodes_t)
                 y_pred = torch.tensor(np.array([linear_sum_assignment(C[x,:,:].detach().cpu().numpy()) 
@@ -195,16 +196,6 @@ def train_eval_model(model, criterion, optimizer, dataloader, num_epochs, resume
         )
 
         print()
-        # Val in each epoch
-        # accs, f1_scores, val_loss = validate.validate_model(model,dataloader['valid'],criterion)
-        # wandb.log({"ep_valid_loss": val_loss, "ep_valid_acc": torch.mean(accs), "ep_valid_f1": torch.mean(f1_scores)})
-        # print(
-        #     "Over whole epoch {:<4} Val -------- Loss: {:.4f} Accuracy: {:.3f} F1: {:.3f}".format(
-        #         epoch, val_loss, torch.mean(accs), torch.mean(f1_scores)
-        #     )
-        # )
-
-        print()
         # Eval in each epoch
         accs, f1_scores = eval.eval_model(model, dataloader["test"])
         acc_dict = {
@@ -218,6 +209,13 @@ def train_eval_model(model, criterion, optimizer, dataloader, num_epochs, resume
         acc_dict["matching_accuracy"] = torch.mean(accs)
         acc_dict["f1_score"] = torch.mean(f1_scores)
 
+        # acc_table = [[x,y] for (x,y) in acc_dict.items()]
+        # f1_table = [[x,y] for (x,y) in f1_dict.items()]
+        # test_acc_table = wandb.Table(data= acc_table, columns = ["Class", "Accuracy"])
+        # test_f1_table = wandb.Table(data= f1_table, columns = ["Class", "F1-score"])
+        
+        # wandb.log({"Test Accuracy" :test_acc_table })
+        # wandb.log({"Test F1-score" :test_f1_table })
         wandb.log({"mean test_acc": torch.mean(accs), "mean test_f1": torch.mean(f1_scores)})
 
         scheduler.step()
@@ -254,6 +252,7 @@ if __name__ == "__main__":
     "dataset": cfg.DATASET_NAME,
     "epochs": lr_schedules[cfg.TRAIN.lr_schedule][0],
     "batch_size": cfg.BATCH_SIZE,
+    "cfg_full": cfg
     }
     )
 
@@ -277,13 +276,13 @@ if __name__ == "__main__":
     # image_dataset["valid"] = val_dataset
     # dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test" or "valid")) for x in ("train", "valid", "test")}
 
-    torch.cuda.set_device(1)
+    torch.cuda.set_device(0)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if cfg.MODEL_ARCH == 'tf':
         model = Net()
         model = model.cuda()
-    else:
+    elif cfg.MODEL_ARCH == 'mlp':
         model = SimpleNet()
         model = model.cuda()
 
@@ -300,7 +299,7 @@ if __name__ == "__main__":
         # dict(params=backbone_params, lr=cfg.TRAIN.LR * 0.01),
         dict(params=new_params, lr=cfg.TRAIN.LR),
     ]
-    optimizer = optim.Adam(opt_params)
+    optimizer = optim.RAdam(opt_params)
 
     if not Path(cfg.model_dir).exists():
         Path(cfg.model_dir).mkdir(parents=True)
