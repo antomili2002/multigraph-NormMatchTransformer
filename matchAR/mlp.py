@@ -41,6 +41,7 @@ def make_queries(h_s, h_t):
 class SimpleNet(utils.backbone.VGG16_bn):
     def __init__(self):
         super(SimpleNet, self).__init__()
+        self.model_name = 'MLP'
         self.psi = SConv(input_features=1024, output_features=256)
         self.mlp_proj = MLPQuery(256, 1024, 256, batch_norm=False)
 
