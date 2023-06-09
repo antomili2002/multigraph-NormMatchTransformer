@@ -48,8 +48,8 @@ class Net(utils.backbone.VGG16_bn):
         self.mlp = MLPQuery(cfg.Matching_TF.d_model, 1024, cfg.Matching_TF.d_model, batch_norm=cfg.Matching_TF.batch_norm)
         self.glob_to_node_dim = nn.Linear(512, cfg.Matching_TF.d_model)
 
-        # self.s_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
-        # self.t_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
+        self.s_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
+        self.t_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
 
         # self.positional_encoding = PositionalEncoding(d_model, max_seq_len)
         self.transformer = nn.Transformer(d_model= cfg.Matching_TF.d_model,
@@ -116,7 +116,7 @@ class Net(utils.backbone.VGG16_bn):
         query_mask = ~(s_mask.view(B, N_s, 1) & t_mask.view(B, 1, N_t))
         query_mask = query_mask.view(B, -1)
         
-        input = torch.cat((h_s, h_t), dim=1)
+        input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
         # print('in_transformer: ', input.size())
 
         queries = make_queries(h_s, h_t)

@@ -276,7 +276,7 @@ if __name__ == "__main__":
     # image_dataset["valid"] = val_dataset
     # dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test" or "valid")) for x in ("train", "valid", "test")}
 
-    torch.cuda.set_device(0)
+    torch.cuda.set_device(1)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if cfg.MODEL_ARCH == 'tf':
