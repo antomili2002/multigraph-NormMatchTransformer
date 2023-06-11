@@ -13,9 +13,9 @@ import os
 from data.data_loader_multigraph import GMDataset, get_dataloader
 from utils.evaluation_metric import matching_accuracy_from_lists, f1_score, get_pos_neg_from_lists, make_perm_mat_pred
 import eval
-from matchAR import Net, SimpleNet
+from matchAR import Net, SimpleNet, EncoderNet
 from utils.config import cfg
-from utils.utils import update_params_from_cmdline
+from utils.utils import update_params_from_cmdline, compute_grad_norm
 
 class HammingLoss(torch.nn.Module):
     def forward(self, suggested, target):
@@ -25,7 +25,7 @@ class HammingLoss(torch.nn.Module):
 
 lr_schedules = {
     #TODO: CHANGE BACK TO 10
-    "long_halving": (30, (2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30), 0.5),
+    "long_halving": (30, (2, 4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
     # "long_halving": (20, (2, 4, 15, 17, 20), 0.1),
     "short_halving": (2, (1,), 0.5),
     "long_nodrop": (10, (10,), 1.0),
@@ -39,7 +39,7 @@ def train_val_dataset(dataset, val_split=0.1):
     datasets['val'] = Subset(dataset, val_idx)
     return datasets['train'], datasets['val']
 
-def train_eval_model(model, criterion, optimizer, dataloader, num_epochs, resume=False, start_epoch=0):
+def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epochs, resume=False, start_epoch=0):
     print("Start training...")
 
     since = time.time()
@@ -135,10 +135,12 @@ def train_eval_model(model, criterion, optimizer, dataloader, num_epochs, resume
 
                 # backward + optimize
                 loss.backward()
+                if max_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
                 optimizer.step()
 
-                if epoch == 2:
-                    print("here for debugging")
+                # if epoch == 2:
+                #     print("here for debugging")
                 # train metrics
                 C = - s_pred_list.view(num_graphs, num_nodes_s, num_nodes_t)
                 y_pred = torch.tensor(np.array([linear_sum_assignment(C[x,:,:].detach().cpu().numpy()) 
@@ -167,8 +169,31 @@ def train_eval_model(model, criterion, optimizer, dataloader, num_epochs, resume
                             epoch, iter_num, running_speed, loss_avg, acc_avg, f1_avg
                         )
                     )
-                    wandb.log({"train_loss": loss_avg, "train_acc": acc_avg, "train_f1": f1_avg})
+                    # if cfg.MODEL_ARCH == 'tf':
+                    #     grad_norm_model = compute_grad_norm(model.parameters())
+                    #     grad_norm_splineCNN = compute_grad_norm(model.psi.parameters())
+                    #     grad_norm_encoder = compute_grad_norm(model.transformer.encoder.parameters())
+                    #     grad_norm_decoder = compute_grad_norm(model.transformer.decoder.parameters())
+                    #     grad_mlp_query = compute_grad_norm(model.mlp.parameters())
+                    #     grad_mlp_out = compute_grad_norm(model.mlp_out.parameters())
 
+                    #     wandb.log({"train_loss": loss_avg, "train_acc": acc_avg, "train_f1": f1_avg, 
+                    #             "grad_model": grad_norm_model, "grad_splineCNN": grad_norm_splineCNN,  
+                    #                 "grad_mlp_out": grad_mlp_out, "grad_mlp_query": grad_mlp_query, 
+                    #                 "grad_encoder": grad_norm_encoder, "grad_decoder": grad_norm_decoder})
+                    # else:
+                    #     grad_norm_model = compute_grad_norm(model.parameters())
+                    #     grad_norm_splineCNN = compute_grad_norm(model.psi.parameters())
+                    #     grad_norm_encoder = compute_grad_norm(model.encoder.parameters())
+                    #     grad_mlp_query = compute_grad_norm(model.mlp.parameters())
+                    #     grad_mlp_out = compute_grad_norm(model.mlp_out.parameters())
+
+                    #     wandb.log({"train_loss": loss_avg, "train_acc": acc_avg, "train_f1": f1_avg, 
+                    #             "grad_model": grad_norm_model, "grad_splineCNN": grad_norm_splineCNN,  
+                    #             "grad_mlp_out": grad_mlp_out, "grad_mlp_query": grad_mlp_query, 
+                    #             "grad_encoder": grad_norm_encoder})
+                    
+                    wandb.log({"train_loss": loss_avg, "train_acc": acc_avg, "train_f1": f1_avg})
 
                     running_acc = 0.0
                     running_f1 = 0.0
@@ -252,7 +277,7 @@ if __name__ == "__main__":
     "dataset": cfg.DATASET_NAME,
     "epochs": lr_schedules[cfg.TRAIN.lr_schedule][0],
     "batch_size": cfg.BATCH_SIZE,
-    "cfg_full": cfg
+    # "cfg_full": cfg
     }
     )
 
@@ -264,19 +289,7 @@ if __name__ == "__main__":
     }
     dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test")) for x in ("train", "test")}
 
-    # trainval_dataset = image_dataset["train"]
-    # # validation_size = 0.1  # 10% of the data will be used for validation
-    # # val_size = int(validation_size * len(trainval_dataset))
-    # # train_size = len(trainval_dataset) - val_size
-    # # train_dataset, val_dataset = torch.utils.data.random_split(trainval_dataset, [0.9, 0.1])
-
-
-    # train_dataset, val_dataset = train_val_dataset(image_dataset["train"], val_split=0.1)
-    # image_dataset["train"] = train_dataset
-    # image_dataset["valid"] = val_dataset
-    # dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test" or "valid")) for x in ("train", "valid", "test")}
-
-    torch.cuda.set_device(1)
+    torch.cuda.set_device(3)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if cfg.MODEL_ARCH == 'tf':
@@ -284,6 +297,9 @@ if __name__ == "__main__":
         model = model.cuda()
     elif cfg.MODEL_ARCH == 'mlp':
         model = SimpleNet()
+        model = model.cuda()
+    elif cfg.MODEL_ARCH == 'enc':
+        model = EncoderNet()
         model = model.cuda()
 
 
@@ -308,7 +324,8 @@ if __name__ == "__main__":
     model, accs = train_eval_model(model, 
                                    criterion, 
                                    optimizer,
-                                   dataloader, 
+                                   dataloader,
+                                   cfg.TRAIN.clip_norm, 
                                    num_epochs=num_epochs,
                                    resume=cfg.warmstart_path is not None, 
                                    start_epoch=0,

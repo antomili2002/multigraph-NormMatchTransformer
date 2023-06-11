@@ -12,11 +12,14 @@
   },
   "Matching_TF": {
     "n_head": 4,
-    "n_encoder": 4,
+    "n_encoder": 6,
     "n_decoder": 4,
     "d_model": 256,
-    "batch_norm": false,
-    "global_feat": false
+    "activation": "relu",
+    "batch_norm": true,
+    "global_feat": false,
+    "pos_encoding": false,
+    "n_lap_EigVec": 8
   },
   "train_sampling": "intersection",
   "eval_sampling": "intersection",
@@ -25,17 +28,19 @@
   "warmstart_path": null,
   "TRAIN": {
     "EPOCH_ITERS": 2000,
-    "LR": 0.0001,
+    "LR": 0.0002,
     "lr_schedule": "long_halving",
+    "clip_norm": 0.1,
     "num_graphs_in_matching_instance": 2
   },
   "STATISTIC_STEP": 20,
+  "TRACK_GRAD_NORM": true,
   "visualize": true,
   "visualization_params": {
     "reduced_vis": true
   },
   "evaluate_only": false,
-  "model_dir": "results/voc_basic",
+  "model_dir": "results/voc_basic/tf_bn_",
   "log_dir": "runs/",
   "MODEL_ARCH": "tf"
 }

@@ -165,3 +165,6 @@ def update_params_from_cmdline(cmd_line=None, default_params=None, custom_parser
   return final_params
 
 update_params_from_cmdline.start_time = None
+
+def compute_grad_norm(model_params):
+    return torch.norm(torch.stack([torch.norm(p.grad) for p in model_params if p.grad is not None]))
