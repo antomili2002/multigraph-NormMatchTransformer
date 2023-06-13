@@ -116,8 +116,6 @@ def easy_visualize(
     positions,
     n_points,
     images,
-    unary_costs,
-    quadratic_costs,
     matchings,
     true_matchings,
     string_info,
@@ -157,12 +155,10 @@ def easy_visualize(
         zip(*graphs),
         zip(*positions),
         zip(*images),
-        zip(*unary_costs),
-        zip(*quadratic_costs),
         zip(*matchings),
         zip(*true_matchings),
     )
-    for b, (graph_l, pos_l, im_l, unary_costs_l, quadratic_costs_l, matchings_l, true_matchings_l) in enumerate(batch):
+    for b, (graph_l, pos_l, im_l, matchings_l, true_matchings_l) in enumerate(batch):
         if not reduced_vis:
             files_single = []
             for i, (graph, pos, im) in enumerate(zip(graph_l, pos_l, im_l)):
@@ -178,8 +174,6 @@ def easy_visualize(
 
         files_mge = []
         for (
-            unary_c,
-            quadratic_c,
             matching,
             true_matching,
             (graph_src, graph_tgt),
@@ -187,7 +181,7 @@ def easy_visualize(
             (im_src, im_tgt),
             (i, j),
         ) in n_and_l_iter_parallel(
-            n=[unary_costs_l, quadratic_costs_l, matchings_l, true_matchings_l], l=[graph_l, pos_l, im_l], enum=True
+            n=[matchings_l, true_matchings_l], l=[graph_l, pos_l, im_l], enum=True
         ):
             im_mge, p_mge, graph_mge, edges_corrct_mge, node_colors_mge, true_graph = merge_images_and_graphs(
                 graph_src, graph_tgt, pos_src, pos_tgt, im_src, im_tgt, new_edges=matching, true_edges=true_matching
@@ -220,9 +214,7 @@ def easy_visualize(
                     true_graph=true_graph,
                 )
                 files_mge.append(f_mge_nodes)
-                costs_and_matchings = dict(
-                    unary_cost=unary_c, quadratic_cost=quadratic_c, matchings=matching, true_matching=true_matching
-                )
+                costs_and_matchings = dict(matchings=matching, true_matching=true_matching)
                 for key, value in costs_and_matchings.items():
                     latex_file.add_section_from_dataframe(
                         name=f"{key} ({b}, {i}-{j})", dataframe=pd.DataFrame(value).round(2)

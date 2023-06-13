@@ -2,6 +2,6 @@
 /data/*/
 /*/__pycache__
 __pycache__
-/wandb
+/wandb*
 /.vscode
 screenlog*

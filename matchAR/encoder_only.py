@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 from torch_geometric.utils import to_dense_batch
+import torch_geometric.transforms as T
+
 
 
 import utils.backbone
@@ -13,6 +15,8 @@ from utils.feature_align import feature_align
 from utils.utils import lexico_iter
 from utils.visualization import easy_visualize
 
+
+transform = T.Compose([T.AddLaplacianEigenvectorPE(k=8, is_undirected=True)])
 
 def normalize_over_channels(x):
     channel_norms = torch.norm(x, dim=1, keepdim=True)
@@ -49,6 +53,7 @@ class EncoderNet(utils.backbone.VGG16_bn):
         self.s_enc = nn.Parameter(torch.randn(256))
         self.t_enc = nn.Parameter(torch.randn(256))
 
+        self.lap_to_node_dim = nn.Linear(cfg.Matching_TF.n_lap_EigVec, cfg.Matching_TF.d_model)
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=cfg.Matching_TF.d_model, nhead=cfg.Matching_TF.n_head, batch_first=True)
         self.encoder = nn.TransformerEncoder(self.encoder_layer, num_layers= cfg.Matching_TF.n_encoder)
         self.mlp_out = MLP([256, 512, 1024, 512, 256], 1, batch_norm=cfg.Matching_TF.batch_norm)
@@ -87,6 +92,11 @@ class EncoderNet(utils.backbone.VGG16_bn):
 
             node_features = torch.cat((U, F), dim=-1)
             graph.x = node_features
+
+            if cfg.Matching_TF.pos_encoding:
+                graph = transform(graph)
+                graph.laplacian_eigenvector_pe = self.lap_to_node_dim(graph.laplacian_eigenvector_pe)
+            
             h = self.psi(graph)
             (h, mask) = to_dense_batch(h, graph.batch, fill_value=0)
 

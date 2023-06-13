@@ -67,7 +67,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
     if cfg.evaluate_only:
         assert resume
         print(f"Evaluating without training...")
-        accs, f1_scores = eval.eval_model(model, dataloader["test"])
+        accs, f1_scores = eval.eval_model(model, dataloader["test"], eval_epoch=5)
         acc_dict = {
             "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.classes, accs)
         }
@@ -115,6 +115,12 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
             n_points_gt_list = [_.cuda() for _ in inputs["ns"]]
             edges_list = [_.to("cuda") for _ in inputs["edges"]]
             perm_mat_list = [perm_mat.cuda() for perm_mat in inputs["gt_perm_mat"]]
+
+            # # randomly swap source and target images
+            # for i in range(data_list[0].shape[0]):
+            #     # with 0.5 probability
+            #         swap(data_list[0][i], data_list[1][i])
+            #         ... # swap everything else, transpose perm_mat_list
 
             num_graphs = points_gt_list[0].size(0)
             num_nodes_s = points_gt_list[0].size(1)
@@ -289,7 +295,7 @@ if __name__ == "__main__":
     }
     dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test")) for x in ("train", "test")}
 
-    torch.cuda.set_device(3)
+    torch.cuda.set_device(1)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if cfg.MODEL_ARCH == 'tf':

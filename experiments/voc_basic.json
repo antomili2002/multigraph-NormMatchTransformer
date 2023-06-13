@@ -40,7 +40,7 @@
     "reduced_vis": true
   },
   "evaluate_only": false,
-  "model_dir": "results/voc_basic/tf_bn_",
+  "model_dir": "results/voc_basic/tf_base_test",
   "log_dir": "runs/",
   "MODEL_ARCH": "tf"
 }

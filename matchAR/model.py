@@ -1,21 +1,17 @@
+import numpy as np
 import torch
 import torch.nn as nn
 from torch_geometric.utils import to_dense_batch
-import torch_geometric.transforms as T
-
+from scipy.optimize import linear_sum_assignment
 
 import utils.backbone
-# from BB_GM.affinity_layer import InnerProductWithWeightsAffinity
 from matchAR.sconv_archs import SConv
-from matchAR.positionalEmbedding import PositionalEncoding
-# from lpmp_py import GraphMatchingModule
-# from lpmp_py import MultiGraphMatchingModule
 from utils.config import cfg
 from utils.feature_align import feature_align
 from utils.utils import lexico_iter
+from utils.evaluation_metric import make_perm_mat_pred
 from utils.visualization import easy_visualize
 
-transform = T.Compose([T.AddLaplacianEigenvectorPE(k=8, is_undirected=True)])
 
 def normalize_over_channels(x):
     channel_norms = torch.norm(x, dim=1, keepdim=True)
@@ -74,18 +70,17 @@ class Net(utils.backbone.VGG16_bn):
         visualize_flag=False,
         visualization_params=None,
     ):
-
+        batch_size = graphs[0].num_graphs
         global_list = []
         orig_graph_list = []
+        graph_list = []
         for image, p, n_p, graph in zip(images, points, n_points, graphs):
             # extract feature
-            nodes = self.node_layers(image)
-            # print('node shape: ',nodes.shape)
-            edges = self.edge_layers(nodes)
-            # print('edges shape: ',nodes.shape)
-
-            # TODO: Global VGG vector
-            # global_list.append(self.final_layers(edges)[0].reshape((nodes.shape[0], -1)))
+            with torch.no_grad():
+                nodes = self.node_layers(image)
+                # print('node shape: ',nodes.shape)
+                edges = self.edge_layers(nodes)
+                # print('edges shape: ',nodes.shape)
             
             nodes = normalize_over_channels(nodes)
             edges = normalize_over_channels(edges)
@@ -98,11 +93,13 @@ class Net(utils.backbone.VGG16_bn):
 
             node_features = torch.cat((U, F), dim=-1)
             graph.x = node_features
+            graph_list.append(graph.to_data_list())
             h = self.psi(graph)
             (h, mask) = to_dense_batch(h, graph.batch, fill_value=0)
             
             if cfg.Matching_TF.global_feat:
-                global_feature = self.final_layers(edges)[0].reshape((nodes.shape[0], -1))
+                with torch.no_grad():
+                    global_feature = self.final_layers(edges)[0].reshape((nodes.shape[0], -1))
                 global_feature = self.glob_to_node_dim(global_feature)
                 global_feature = global_feature.unsqueeze(1).expand(-1, h.size(1), -1)
                 h = h + global_feature
@@ -134,6 +131,21 @@ class Net(utils.backbone.VGG16_bn):
         # print('out_transformer: ', transformer_out.size())
         output = self.mlp_out(transformer_out)
         # print('output: ', output.size())
+
+        C = - output.view(batch_size, N_s, N_t)
+        y_pred = torch.tensor(np.array([linear_sum_assignment(C[x,:,:].detach().cpu().numpy()) 
+                            for x in range(batch_size)])).to(output.device)
+        matchings = [make_perm_mat_pred(y_pred[:,1,:], N_t).to(output.device)]
+
+        if visualize_flag:
+            easy_visualize(
+                graph_list,
+                points,
+                n_points,
+                images,
+                matchings,
+                **visualization_params,
+            )
 
         return output.squeeze(2)
 
