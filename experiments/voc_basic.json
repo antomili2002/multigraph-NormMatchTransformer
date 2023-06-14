@@ -14,7 +14,7 @@
     "n_head": 4,
     "n_encoder": 6,
     "n_decoder": 4,
-    "d_model": 256,
+    "d_model": 512,
     "activation": "relu",
     "batch_norm": true,
     "global_feat": false,
@@ -23,7 +23,7 @@
   },
   "train_sampling": "intersection",
   "eval_sampling": "intersection",
-  "save_checkpoint": false,
+  "save_checkpoint": true,
   "RANDOM_SEED": 123,
   "warmstart_path": null,
   "TRAIN": {
@@ -35,7 +35,7 @@
   },
   "STATISTIC_STEP": 20,
   "TRACK_GRAD_NORM": true,
-  "visualize": true,
+  "visualize": false,
   "visualization_params": {
     "reduced_vis": true
   },

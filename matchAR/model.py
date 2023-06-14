@@ -76,11 +76,11 @@ class Net(utils.backbone.VGG16_bn):
         graph_list = []
         for image, p, n_p, graph in zip(images, points, n_points, graphs):
             # extract feature
-            with torch.no_grad():
-                nodes = self.node_layers(image)
-                # print('node shape: ',nodes.shape)
-                edges = self.edge_layers(nodes)
-                # print('edges shape: ',nodes.shape)
+            # with torch.no_grad():
+            nodes = self.node_layers(image)
+            # print('node shape: ',nodes.shape)
+            edges = self.edge_layers(nodes)
+            # print('edges shape: ',nodes.shape)
             
             nodes = normalize_over_channels(nodes)
             edges = normalize_over_channels(edges)

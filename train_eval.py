@@ -295,7 +295,7 @@ if __name__ == "__main__":
     }
     dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test")) for x in ("train", "test")}
 
-    torch.cuda.set_device(1)
+    torch.cuda.set_device(0)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if cfg.MODEL_ARCH == 'tf':
@@ -318,7 +318,7 @@ if __name__ == "__main__":
 
     new_params = [param for param in model.parameters() if id(param) not in backbone_ids]
     opt_params = [
-        # dict(params=backbone_params, lr=cfg.TRAIN.LR * 0.01),
+        dict(params=backbone_params, lr=cfg.TRAIN.LR * 0.01),
         dict(params=new_params, lr=cfg.TRAIN.LR),
     ]
     optimizer = optim.RAdam(opt_params)
