@@ -39,6 +39,27 @@ def train_val_dataset(dataset, val_split=0.1):
     datasets['val'] = Subset(dataset, val_idx)
     return datasets['train'], datasets['val']
 
+def swap_src_tgt_order(data_list, i):
+    # edge features
+    if data_list[0].__class__.__name__ == 'DataBatch':
+        tmp = data_list[1]
+        data_list[1] = data_list[0]
+        data_list[0] = tmp
+    else:
+        tmp = data_list[1][i].clone()
+        data_list[1][i] = data_list[0][i]
+        data_list[0][i] = tmp
+    return data_list
+
+def swap_permutation_matrix(perm_mat_list, i):
+    transposed_slice = torch.transpose(perm_mat_list[0][i, :, :], 0, 1)
+    output_tensor = perm_mat_list[0].clone()
+    output_tensor[0, :, :] = transposed_slice
+
+    return [output_tensor]
+
+
+
 def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epochs, resume=False, start_epoch=0):
     print("Start training...")
 
@@ -117,10 +138,21 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
             perm_mat_list = [perm_mat.cuda() for perm_mat in inputs["gt_perm_mat"]]
 
             # # randomly swap source and target images
-            # for i in range(data_list[0].shape[0]):
-            #     # with 0.5 probability
-            #         swap(data_list[0][i], data_list[1][i])
-            #         ... # swap everything else, transpose perm_mat_list
+            if cfg.TRAIN.random_swap:
+                for i in range(data_list[0].shape[0]):
+                    # with 0.5 probability
+                    swap_flag = torch.bernoulli(torch.Tensor([0.5]))
+                    swap_flag = int(swap_flag.item())
+
+                    if swap_flag:
+                        # swap edge list
+                        # swap everything else
+                        perm_mat_list = swap_permutation_matrix(perm_mat_list, i)
+                        data_list = swap_src_tgt_order(data_list, i)
+                        points_gt_list = swap_src_tgt_order(points_gt_list, i)
+                        n_points_gt_list = swap_src_tgt_order(n_points_gt_list, i)
+                        edges_list = swap_src_tgt_order(edges_list, i)
+
 
             num_graphs = points_gt_list[0].size(0)
             num_nodes_s = points_gt_list[0].size(1)
@@ -175,30 +207,31 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                             epoch, iter_num, running_speed, loss_avg, acc_avg, f1_avg
                         )
                     )
-                    # if cfg.MODEL_ARCH == 'tf':
-                    #     grad_norm_model = compute_grad_norm(model.parameters())
-                    #     grad_norm_splineCNN = compute_grad_norm(model.psi.parameters())
-                    #     grad_norm_encoder = compute_grad_norm(model.transformer.encoder.parameters())
-                    #     grad_norm_decoder = compute_grad_norm(model.transformer.decoder.parameters())
-                    #     grad_mlp_query = compute_grad_norm(model.mlp.parameters())
-                    #     grad_mlp_out = compute_grad_norm(model.mlp_out.parameters())
+                    """
+                    if cfg.MODEL_ARCH == 'tf':
+                        grad_norm_model = compute_grad_norm(model.parameters())
+                        grad_norm_splineCNN = compute_grad_norm(model.psi.parameters())
+                        grad_norm_encoder = compute_grad_norm(model.transformer.encoder.parameters())
+                        grad_norm_decoder = compute_grad_norm(model.transformer.decoder.parameters())
+                        grad_mlp_query = compute_grad_norm(model.mlp.parameters())
+                        grad_mlp_out = compute_grad_norm(model.mlp_out.parameters())
 
-                    #     wandb.log({"train_loss": loss_avg, "train_acc": acc_avg, "train_f1": f1_avg, 
-                    #             "grad_model": grad_norm_model, "grad_splineCNN": grad_norm_splineCNN,  
-                    #                 "grad_mlp_out": grad_mlp_out, "grad_mlp_query": grad_mlp_query, 
-                    #                 "grad_encoder": grad_norm_encoder, "grad_decoder": grad_norm_decoder})
-                    # else:
-                    #     grad_norm_model = compute_grad_norm(model.parameters())
-                    #     grad_norm_splineCNN = compute_grad_norm(model.psi.parameters())
-                    #     grad_norm_encoder = compute_grad_norm(model.encoder.parameters())
-                    #     grad_mlp_query = compute_grad_norm(model.mlp.parameters())
-                    #     grad_mlp_out = compute_grad_norm(model.mlp_out.parameters())
+                        wandb.log({"train_loss": loss_avg, "train_acc": acc_avg, "train_f1": f1_avg, 
+                                "grad_model": grad_norm_model, "grad_splineCNN": grad_norm_splineCNN,  
+                                    "grad_mlp_out": grad_mlp_out, "grad_mlp_query": grad_mlp_query, 
+                                    "grad_encoder": grad_norm_encoder, "grad_decoder": grad_norm_decoder})
+                    else:
+                        grad_norm_model = compute_grad_norm(model.parameters())
+                        grad_norm_splineCNN = compute_grad_norm(model.psi.parameters())
+                        grad_norm_encoder = compute_grad_norm(model.encoder.parameters())
+                        grad_mlp_query = compute_grad_norm(model.mlp.parameters())
+                        grad_mlp_out = compute_grad_norm(model.mlp_out.parameters())
 
-                    #     wandb.log({"train_loss": loss_avg, "train_acc": acc_avg, "train_f1": f1_avg, 
-                    #             "grad_model": grad_norm_model, "grad_splineCNN": grad_norm_splineCNN,  
-                    #             "grad_mlp_out": grad_mlp_out, "grad_mlp_query": grad_mlp_query, 
-                    #             "grad_encoder": grad_norm_encoder})
-                    
+                        wandb.log({"train_loss": loss_avg, "train_acc": acc_avg, "train_f1": f1_avg, 
+                                "grad_model": grad_norm_model, "grad_splineCNN": grad_norm_splineCNN,  
+                                "grad_mlp_out": grad_mlp_out, "grad_mlp_query": grad_mlp_query, 
+                                "grad_encoder": grad_norm_encoder})
+                    """
                     wandb.log({"train_loss": loss_avg, "train_acc": acc_avg, "train_f1": f1_avg})
 
                     running_acc = 0.0
@@ -295,7 +328,7 @@ if __name__ == "__main__":
     }
     dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test")) for x in ("train", "test")}
 
-    torch.cuda.set_device(0)
+    torch.cuda.set_device(1)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if cfg.MODEL_ARCH == 'tf':

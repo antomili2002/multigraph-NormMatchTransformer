@@ -31,7 +31,8 @@
     "LR": 0.0002,
     "lr_schedule": "long_halving",
     "clip_norm": 0.1,
-    "num_graphs_in_matching_instance": 2
+    "num_graphs_in_matching_instance": 2,
+    "random_swap": false
   },
   "STATISTIC_STEP": 20,
   "TRACK_GRAD_NORM": true,
@@ -40,7 +41,7 @@
     "reduced_vis": true
   },
   "evaluate_only": false,
-  "model_dir": "results/voc_basic/tf_base_test",
+  "model_dir": "/work/ayadav/results/voc_basic/tf_unfreeze",
   "log_dir": "runs/",
   "MODEL_ARCH": "tf"
 }
