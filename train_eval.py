@@ -13,7 +13,7 @@ import os
 from data.data_loader_multigraph import GMDataset, get_dataloader
 from utils.evaluation_metric import matching_accuracy_from_lists, f1_score, get_pos_neg_from_lists, make_perm_mat_pred
 import eval
-from matchAR import Net, SimpleNet, EncoderNet
+from matchAR import Net, SimpleNet, EncoderNet, ResMatcherNet
 from utils.config import cfg
 from utils.utils import update_params_from_cmdline, compute_grad_norm
 
@@ -25,7 +25,7 @@ class HammingLoss(torch.nn.Module):
 
 lr_schedules = {
     #TODO: CHANGE BACK TO 10
-    "long_halving": (30, (2, 4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
+    "long_halving": (15, (2, 4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
     # "long_halving": (20, (2, 4, 15, 17, 20), 0.1),
     "short_halving": (2, (1,), 0.5),
     "long_nodrop": (10, (10,), 1.0),
@@ -52,9 +52,9 @@ def swap_src_tgt_order(data_list, i):
     return data_list
 
 def swap_permutation_matrix(perm_mat_list, i):
-    transposed_slice = torch.transpose(perm_mat_list[0][i, :, :], 0, 1)
+    transposed_slice = torch.transpose(perm_mat_list[0][i, :, :], 1, 0)
     output_tensor = perm_mat_list[0].clone()
-    output_tensor[0, :, :] = transposed_slice
+    output_tensor[i, :, :] = transposed_slice
 
     return [output_tensor]
 
@@ -316,7 +316,7 @@ if __name__ == "__main__":
     "dataset": cfg.DATASET_NAME,
     "epochs": lr_schedules[cfg.TRAIN.lr_schedule][0],
     "batch_size": cfg.BATCH_SIZE,
-    # "cfg_full": cfg
+    "cfg_full": cfg
     }
     )
 
@@ -328,24 +328,25 @@ if __name__ == "__main__":
     }
     dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test")) for x in ("train", "test")}
 
-    torch.cuda.set_device(1)
+    torch.cuda.set_device(2)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if cfg.MODEL_ARCH == 'tf':
         model = Net()
-        model = model.cuda()
     elif cfg.MODEL_ARCH == 'mlp':
         model = SimpleNet()
-        model = model.cuda()
     elif cfg.MODEL_ARCH == 'enc':
         model = EncoderNet()
-        model = model.cuda()
+    elif cfg.MODEL_ARCH == 'res':
+        model = ResMatcherNet()
+    
+    model = model.cuda()
 
 
     criterion = torch.nn.BCEWithLogitsLoss()
 
     backbone_params = list(model.node_layers.parameters()) + list(model.edge_layers.parameters())
-    # backbone_params += list(model.final_layers.parameters())
+    backbone_params += list(model.final_layers.parameters())
 
     backbone_ids = [id(item) for item in backbone_params]
 

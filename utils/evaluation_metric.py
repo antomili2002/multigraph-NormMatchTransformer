@@ -16,6 +16,25 @@ def make_perm_mat_pred(matching_vec, num_nodes_t):
     
     return torch.stack(perm_mat_pred)
 
+# def make_perm_mat_pred(matching_vec, num_nodes_t, n_points_gt_list):
+
+#     device = matching_vec.device
+
+#     batch_size = matching_vec.size()[0]
+#     nodes = matching_vec.size()[1]
+#     n_point_gt = n_points_gt_list[0]
+#     perm_mat_pred = []
+#     for i in range(batch_size):
+#         n_points_in_img = n_point_gt[i]
+#         row_idx = torch.arange(n_points_in_img)
+#         one_hot_pred = torch.zeros(nodes, num_nodes_t)
+#         index = matching_vec[i, :n_points_in_img]
+#         one_hot_pred[row_idx, index] = 1
+#         perm_mat_pred.append(one_hot_pred)
+    
+#     return torch.stack(perm_mat_pred)
+
+
 def f1_score(tp, fp, fn):
     """
     F1 score (harmonic mix of precision and recall) between predicted permutation matrix and ground truth permutation matrix.

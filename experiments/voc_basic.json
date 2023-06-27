@@ -17,13 +17,13 @@
     "d_model": 512,
     "activation": "relu",
     "batch_norm": true,
-    "global_feat": false,
+    "global_feat": true,
     "pos_encoding": false,
     "n_lap_EigVec": 8
   },
   "train_sampling": "intersection",
   "eval_sampling": "intersection",
-  "save_checkpoint": true,
+  "save_checkpoint": false,
   "RANDOM_SEED": 123,
   "warmstart_path": null,
   "TRAIN": {
@@ -35,13 +35,13 @@
     "random_swap": false
   },
   "STATISTIC_STEP": 20,
-  "TRACK_GRAD_NORM": true,
+  "TRACK_GRAD_NORM": false,
   "visualize": false,
   "visualization_params": {
     "reduced_vis": true
   },
   "evaluate_only": false,
-  "model_dir": "/work/ayadav/results/voc_basic/tf_unfreeze",
+  "model_dir": "/work/ayadav/results/voc_basic/tf_unfreeze_test_globalvec_posenc",
   "log_dir": "runs/",
-  "MODEL_ARCH": "tf"
+  "MODEL_ARCH": "res"
 }
