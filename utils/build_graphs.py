@@ -34,7 +34,7 @@ def build_graphs(P_np: np.ndarray, n: int, n_pad: int = None, edge_pad: int = No
     if not features:
         features = np.zeros(shape=(0, 2))
 
-    return np.array(edge_list, dtype=np.int), np.array(features)
+    return np.array(edge_list, dtype=int), np.array(features)
 
 
 def delaunay_triangulate(P: np.ndarray):

@@ -16,7 +16,7 @@ def eval_model(model, dataloader, eval_epoch=None, verbose=False):
     device = next(model.parameters()).device
 
     if eval_epoch is not None:
-        model_path = str(Path(cfg.OUTPUT_PATH) / "params" / "params_{:04}.pt".format(eval_epoch))
+        model_path = str(Path(cfg.model_dir) / "params" / "{:04}".format(eval_epoch) / "params.pt")
         print("Loading model parameters from {}".format(model_path))
         model.load_state_dict(torch.load(model_path))
 

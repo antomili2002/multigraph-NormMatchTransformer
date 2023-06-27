@@ -6,6 +6,7 @@ from scipy.optimize import linear_sum_assignment
 
 import utils.backbone
 from matchAR.sconv_archs import SConv
+from matchAR.positionalEmbedding import Pointwise2DPositionalEncoding
 from utils.config import cfg
 from utils.feature_align import feature_align
 from utils.utils import lexico_iter
@@ -37,20 +38,22 @@ def make_queries(h_s, h_t):
     return queries
 
 
-class Net(utils.backbone.VGG16_bn):
+class ResMatcherNet(utils.backbone.VGG16_bn):
     def __init__(self):
-        super(Net, self).__init__()
+        super(ResMatcherNet, self).__init__()
         self.model_name = 'Transformer'
         self.psi = SConv(input_features=cfg.SPLINE_CNN.input_features, output_features=cfg.Matching_TF.d_model)
         self.mlp = MLPQuery(cfg.Matching_TF.d_model, 1024, cfg.Matching_TF.d_model, batch_norm=cfg.Matching_TF.batch_norm)
+        
+        self.vgg_to_node_dim = nn.Linear(cfg.SPLINE_CNN.input_features, cfg.Matching_TF.d_model)
         self.glob_to_node_dim = nn.Linear(512, cfg.Matching_TF.d_model)
 
         self.s_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
         self.t_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
         self.cls_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
+        self.pos_encoding = Pointwise2DPositionalEncoding(cfg.Matching_TF.d_model, 256, 256).cuda()
 
-        # self.positional_encoding = PositionalEncoding(d_model, max_seq_len)
-        self.lap_to_node_dim = nn.Linear(cfg.Matching_TF.n_lap_EigVec, cfg.Matching_TF.d_model)
+
         self.transformer = nn.Transformer(d_model= cfg.Matching_TF.d_model,
                                           nhead= cfg.Matching_TF.n_head, 
                                           num_encoder_layers=cfg.Matching_TF.n_encoder, 
@@ -74,41 +77,52 @@ class Net(utils.backbone.VGG16_bn):
         batch_size = graphs[0].num_graphs
         global_list = []
         orig_graph_list = []
+        node_feat_list = []
+        # for visualisation purposes only
         graph_list = []
         for image, p, n_p, graph in zip(images, points, n_points, graphs):
             # extract feature
             # with torch.no_grad():
             nodes = self.node_layers(image)
-            # print('node shape: ',nodes.shape)
             edges = self.edge_layers(nodes)
-            # print('edges shape: ',nodes.shape)
             
             nodes = normalize_over_channels(nodes)
             edges = normalize_over_channels(edges)
 
             # arrange features
             U = concat_features(feature_align(nodes, p, n_p, (256, 256)), n_p)
-            # print('U shape: ',U.shape)
             F = concat_features(feature_align(edges, p, n_p, (256, 256)), n_p)
-            # print('F shape: ',F.shape)
 
             node_features = torch.cat((U, F), dim=-1)
             graph.x = node_features
+            # for visualisation purposes only
             graph_list.append(graph.to_data_list())
+
+            # node + edge features from vgg
+            vgg_features = self.vgg_to_node_dim(node_features)
+            # splineCNN spatial features 
             h = self.psi(graph)
-            (h, mask) = to_dense_batch(h, graph.batch, fill_value=0)
+
+            h_res = h + vgg_features
+                            
+            (h_res, mask) = to_dense_batch(h_res, graph.batch, fill_value=0)
+
+            if cfg.Matching_TF.pos_encoding:
+                h_res = h_res + self.pos_encoding(p)
             
             if cfg.Matching_TF.global_feat:
+                # with torch.no_grad():
                 global_feature = self.final_layers(edges)[0].reshape((nodes.shape[0], -1))
                 global_feature = self.glob_to_node_dim(global_feature)
                 global_feature = global_feature + self.cls_enc
                 global_feature = global_feature.unsqueeze(1).expand(-1,1, -1)
-                h = torch.cat([h, global_feature], dim=1)
+                h_res = torch.cat([h_res, global_feature], dim=1)
 
-                global_feature_mask = torch.tensor([True]).unsqueeze(0).expand(h.size(0), -1).to(global_feature.device)
+                global_feature_mask = torch.tensor([True]).unsqueeze(0).expand(h_res.size(0), -1).to(global_feature.device)
                 mask = torch.cat([mask, global_feature_mask], dim=1)
 
-            orig_graph_list.append((h,mask))
+
+            orig_graph_list.append((h_res,mask))
 
         h_s, s_mask = orig_graph_list[0]
         h_t, t_mask = orig_graph_list[1]

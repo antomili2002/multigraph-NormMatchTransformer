@@ -1,7 +1,7 @@
 """Graph matching config system."""
 
 import os
-from easydict import EasyDict as edict
+from easydict import EasyDict as edict 
 
 __C = edict()
 # Consumers can get config by:
