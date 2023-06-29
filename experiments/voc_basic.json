@@ -17,7 +17,7 @@
     "d_model": 512,
     "activation": "relu",
     "batch_norm": true,
-    "global_feat": true,
+    "global_feat": false,
     "pos_encoding": false,
     "n_lap_EigVec": 8
   },
@@ -32,7 +32,8 @@
     "lr_schedule": "long_halving",
     "clip_norm": 0.1,
     "num_graphs_in_matching_instance": 2,
-    "random_swap": false
+    "random_swap": false,
+    "AR": true
   },
   "STATISTIC_STEP": 20,
   "TRACK_GRAD_NORM": false,
@@ -43,5 +44,5 @@
   "evaluate_only": false,
   "model_dir": "/work/ayadav/results/voc_basic/tf_unfreeze_test_globalvec_posenc",
   "log_dir": "runs/",
-  "MODEL_ARCH": "res"
+  "MODEL_ARCH": "ar"
 }

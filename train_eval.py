@@ -13,7 +13,7 @@ import os
 from data.data_loader_multigraph import GMDataset, get_dataloader
 from utils.evaluation_metric import matching_accuracy_from_lists, f1_score, get_pos_neg_from_lists, make_perm_mat_pred
 import eval
-from matchAR import Net, SimpleNet, EncoderNet, ResMatcherNet
+from matchAR import Net, SimpleNet, EncoderNet, ResMatcherNet, MatchARNet
 from utils.config import cfg
 from utils.utils import update_params_from_cmdline, compute_grad_norm
 
@@ -57,7 +57,6 @@ def swap_permutation_matrix(perm_mat_list, i):
     output_tensor[i, :, :] = transposed_slice
 
     return [output_tensor]
-
 
 
 def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epochs, resume=False, start_epoch=0):
@@ -153,6 +152,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                         n_points_gt_list = swap_src_tgt_order(n_points_gt_list, i)
                         edges_list = swap_src_tgt_order(edges_list, i)
 
+            n_points_gt_sample = n_points_gt_list[0].to('cpu').apply_(lambda x: torch.randint(low=0, high=x, size=(1,)).item()).to(device)
+
 
             num_graphs = points_gt_list[0].size(0)
             num_nodes_s = points_gt_list[0].size(1)
@@ -164,7 +165,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
 
             with torch.set_grad_enabled(True):
                 # forward
-                s_pred_list = model(data_list, points_gt_list, edges_list, n_points_gt_list, perm_mat_list)
+                s_pred_list = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
                 y_gt = torch.flatten(perm_mat_list[0], 1, 2)
                 loss = criterion(s_pred_list, y_gt)
 
@@ -339,6 +340,8 @@ if __name__ == "__main__":
         model = EncoderNet()
     elif cfg.MODEL_ARCH == 'res':
         model = ResMatcherNet()
+    elif cfg.MODEL_ARCH == 'ar':
+        model = MatchARNet()
     
     model = model.cuda()
 
