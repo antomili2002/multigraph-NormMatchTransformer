@@ -54,13 +54,6 @@ class MatchARNet(utils.backbone.VGG16_bn):
         self.cls_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
         self.pos_encoding = Pointwise2DPositionalEncoding(cfg.Matching_TF.d_model, 256, 256).cuda()
 
-
-        # self.transformer = nn.Transformer(d_model= cfg.Matching_TF.d_model,
-        #                                   nhead= cfg.Matching_TF.n_head, 
-        #                                   num_encoder_layers=cfg.Matching_TF.n_encoder, 
-        #                                   num_decoder_layers=cfg.Matching_TF.n_decoder,
-        #                                   batch_first=True, 
-        #                                   activation=cfg.Matching_TF.activation)
         self.tf_encoder_layer = nn.TransformerEncoderLayer(d_model= cfg.Matching_TF.d_model, 
                                                            nhead= cfg.Matching_TF.n_head, 
                                                            batch_first=True)
@@ -80,18 +73,22 @@ class MatchARNet(utils.backbone.VGG16_bn):
         self.mask_match_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
     
     
-    def update_queries(self, Q, n_points_sample, perm_mats= None, indcies=None):
+    def update_queries(self, Q, n_points_sample, in_training, perm_mats= None):
 
         # assert (perm_mats != None) and (idx == None) , "supply permutation matrix to initisize or idx to update queries"
         B,D= Q.size(0), Q.size(2)
         N_s = N_t = int(math.sqrt(Q.size(1)))
         queries = Q.view(B, N_s, N_t, -1)
         # add match and mask_match encoding to relevant queries
-        for batch_idx, i in zip(range(B),n_points_sample):
-            if perm_mats != None:
+        for batch_idx in range(B):
+            i = n_points_sample[batch_idx]
+            if in_training:
                 idx = torch.nonzero(perm_mats[0][batch_idx, :i] == 1)
             else:
-                idx = indcies[batch_idx,:].unsqueeze(0)
+                idx = torch.nonzero(perm_mats[0][batch_idx] == 1)
+                if i != 0:
+                    idx = idx[-1].unsqueeze(0)
+                
             # add mask_match to source node rows
             queries[batch_idx, idx[:, 0], :, :] = queries[batch_idx, idx[:, 0], :, :] + self.mask_match_enc.unsqueeze(0).expand(N_t, D)
             # add mask_match to target node cols
@@ -115,6 +112,7 @@ class MatchARNet(utils.backbone.VGG16_bn):
         perm_mats,
         visualize_flag=False,
         visualization_params=None,
+        in_training=True
     ):
         batch_size = graphs[0].num_graphs
         global_list = []
@@ -205,31 +203,38 @@ class MatchARNet(utils.backbone.VGG16_bn):
         
         queries = queries.view(B, N_s * N_t, -1)
         """
-        queries = self.update_queries(queries, n_points_sample, perm_mats=perm_mats)
+        queries = self.update_queries(queries, n_points_sample, in_training, perm_mats=perm_mats)
         query_mask = query_mask.view(B, -1)
         
         input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
         memory = self.tf_encoder(src=input, src_key_padding_mask=S_mask)
+        decoded_queries = self.tf_decoder(tgt= queries,
+                                          memory=memory,
+                                          tgt_key_padding_mask= query_mask,
+                                          memory_key_padding_mask= S_mask)
+        output = self.mlp_out(decoded_queries)
+        
+        return output.squeeze(2)
 
         # loop
-        matchings = []
-        for i in range(N_t):
-            # decode queries
-            decoded_queries = self.tf_decoder(tgt= queries, 
-                                            memory=memory, 
-                                            tgt_key_padding_mask= query_mask, 
-                                            memory_key_padding_mask= S_mask)
-            # pick most confident match
-            output = self.mlp_out(decoded_queries)
-            C = - output.view(batch_size, N_s, N_t)
-            C_per_batch = [C[x,:,:] for x in range(B)]
-            argmax_idx = [torch.argmax(C) for C in C_per_batch]
-            pair_idx = torch.tensor([(x // N_s, x % N_s) for x in  argmax_idx])
-            matchings.append(pair_idx)
-            # update query matrix
-            queries = self.update_queries(queries, n_points_sample, indcies=pair_idx)
+        # matchings = []
+        # for i in range(N_t):
+        #     # decode queries
+        #     decoded_queries = self.tf_decoder(tgt= queries, 
+        #                                     memory=memory, 
+        #                                     tgt_key_padding_mask= query_mask, 
+        #                                     memory_key_padding_mask= S_mask)
+        #     # pick most confident match
+        #     output = self.mlp_out(decoded_queries)
+        #     C = - output.view(batch_size, N_s, N_t)
+        #     C_per_batch = [C[x,:,:] for x in range(B)]
+        #     argmax_idx = [torch.argmax(C) for C in C_per_batch]
+        #     pair_idx = torch.tensor([(x // N_s, x % N_s) for x in  argmax_idx])
+        #     matchings.append(pair_idx)
+        #     # update query matrix
+        #     queries = self.update_queries(queries, n_points_sample, indcies=pair_idx)
         
-        matchings = torch.stack(matchings, dim=2)
+        # matchings = torch.stack(matchings, dim=2)
 
             
 
@@ -248,7 +253,7 @@ class MatchARNet(utils.backbone.VGG16_bn):
         #         **visualization_params,
         #     )
 
-        return output.squeeze(2)
+
     
 
 

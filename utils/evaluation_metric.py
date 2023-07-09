@@ -16,6 +16,22 @@ def make_perm_mat_pred(matching_vec, num_nodes_t):
     
     return torch.stack(perm_mat_pred)
 
+def make_sampled_perm_mat_pred(matching_vec, n_sampled_list):
+
+    device = matching_vec.device
+
+    batch_size = matching_vec.size()[0]
+    nodes = matching_vec.size()[1]
+    perm_mat_pred = []
+    for i in range(batch_size):
+        row_idx = torch.arange(nodes)
+        one_hot_pred = torch.zeros(nodes, n_sampled_list[i])
+        index = matching_vec[i, :]
+        one_hot_pred[row_idx, index] = 1
+        perm_mat_pred.append(one_hot_pred)
+    
+    return torch.stack(perm_mat_pred)
+
 # def make_perm_mat_pred(matching_vec, num_nodes_t, n_points_gt_list):
 
 #     device = matching_vec.device

@@ -60,24 +60,54 @@ def eval_model(model, dataloader, eval_epoch=None, verbose=False):
 
             visualize = k == 0 and cfg.visualize
             visualization_params = {**cfg.visualization_params, **dict(string_info=cls, true_matchings=perm_mat_list)}
+            
             with torch.set_grad_enabled(False):
-                s_pred_list = model(
-                    data_list,
-                    points_gt,
-                    edges,
-                    n_points_gt,
-                    perm_mat_list,
-                    visualize_flag=visualize,
-                    visualization_params=visualization_params,
-                )
+                
+                matchings = []
+                B, N_s, N_t = perm_mat_list[0].size()
+                n_points_sample = torch.zeros(B, dtype=torch.int).to(device)
+                perm_mat_dec_list = [torch.zeros(B, N_s, N_t, dtype=torch.int).to(device)]
+                cost_mask = torch.ones(B, N_s, N_t, dtype=torch.int).to(device)
+                
+                batch_idx = torch.arange(8)
+                for i in range(N_t):
+                    s_pred_list = model(
+                        data_list,
+                        points_gt,
+                        edges,
+                        n_points_gt,
+                        n_points_sample,
+                        perm_mat_dec_list,
+                        in_training= False
+                    )
+                    scores = s_pred_list.view(B, N_s, N_t)
+                    
+                    #apply matched mask to matching scores
+                    scores[cost_mask == -1] = -torch.inf
+                    
+                    scores_per_batch = [scores[x,:,:] for x in range(B)]
+                    argmax_idx = [torch.argmax(sc) for sc in scores_per_batch]
+                    pair_idx = torch.tensor([(x // N_s, x % N_s) for x in  argmax_idx])
+                    
+                    # update mask of matched nodes
+                    cost_mask[batch_idx, pair_idx[:,0], :] = -1
+                    cost_mask[batch_idx, :, pair_idx[:,1]] = -1
+                    
+                    #update permutation matrix
+                    perm_mat_dec_list[0][batch_idx, pair_idx[:,0], pair_idx[:,1]] = 1
+                    #update numnber of points sampled
+                    n_points_sample += 1 
+                    
+                    matchings.append(pair_idx)
+                    
+                                    
+                matchings = torch.stack(matchings, dim=2)
+                sorted_values, sorted_indices = torch.sort(matchings[:, 0, :], dim=1)
+                matchings[:,1, :] = matchings[:,1,sorted_indices][:,0]
+                matchings[:,0, :] = sorted_values
 
-                y_gt = torch.flatten(perm_mat_list[0], 1, 2)
-                C = - s_pred_list.view(batch_num, num_nodes_s, num_nodes_t)
-                y_pred = torch.tensor(np.array([linear_sum_assignment(C[x,:,:].detach().cpu().numpy()) 
-                                    for x in range(batch_num)])).to(device)
-                s_pred_mat_list = [make_perm_mat_pred(y_pred[:,1,:], num_nodes_t).to(device)]
-
-
+            # evaluation metrics
+            s_pred_mat_list = [make_perm_mat_pred(matchings[:,1,:], num_nodes_t).to(device)]
             _, _acc_match_num, _acc_total_num = matching_accuracy(s_pred_mat_list[0], perm_mat_list[0])
             _tp, _fp, _fn = get_pos_neg(s_pred_mat_list[0], perm_mat_list[0])
 

@@ -11,7 +11,7 @@ from pathlib import Path
 import os
 
 from data.data_loader_multigraph import GMDataset, get_dataloader
-from utils.evaluation_metric import matching_accuracy_from_lists, f1_score, get_pos_neg_from_lists, make_perm_mat_pred
+from utils.evaluation_metric import matching_accuracy_from_lists, f1_score, get_pos_neg_from_lists, make_perm_mat_pred, make_sampled_perm_mat_pred
 import eval
 from matchAR import Net, SimpleNet, EncoderNet, ResMatcherNet, MatchARNet
 from utils.config import cfg
@@ -58,6 +58,17 @@ def swap_permutation_matrix(perm_mat_list, i):
 
     return [output_tensor]
 
+def mask_loss(perm_mat_list, sampled_points):
+    perm_mat_mask = []
+    B, N_s, N_t  = perm_mat_list[0].size()
+
+    for i in sampled_points:
+        mask = torch.ones(N_s, N_t)
+        mask[:i,:] = torch.zeros(i, N_t)
+        perm_mat_mask.append(mask)
+    perm_mat_mask = torch.stack(perm_mat_mask, dim=0).to(sampled_points.device)
+    return perm_mat_mask
+        
 
 def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epochs, resume=False, start_epoch=0):
     print("Start training...")
@@ -153,6 +164,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                         edges_list = swap_src_tgt_order(edges_list, i)
 
             n_points_gt_sample = n_points_gt_list[0].to('cpu').apply_(lambda x: torch.randint(low=0, high=x, size=(1,)).item()).to(device)
+            perm_mat_mask = mask_loss(perm_mat_list, n_points_gt_sample) > 0
+            perm_mat_mask = torch.flatten(perm_mat_mask, 1, 2)
 
 
             num_graphs = points_gt_list[0].size(0)
@@ -167,9 +180,10 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 # forward
                 s_pred_list = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
                 y_gt = torch.flatten(perm_mat_list[0], 1, 2)
-                loss = criterion(s_pred_list, y_gt)
-
-                # loss = sum([criterion(s_pred, perm_mat) for s_pred, perm_mat in zip(s_pred_list, perm_mat_list)])
+                y_gt_masked = torch.masked_select(y_gt, perm_mat_mask)
+                s_pred_masked = torch.masked_select(s_pred_list, perm_mat_mask)
+                
+                loss = criterion(s_pred_masked, y_gt_masked)
                 loss /= len(s_pred_list)
 
                 # backward + optimize
@@ -178,13 +192,51 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
                 optimizer.step()
 
-                # if epoch == 2:
-                #     print("here for debugging")
-                # train metrics
-                C = - s_pred_list.view(num_graphs, num_nodes_s, num_nodes_t)
-                y_pred = torch.tensor(np.array([linear_sum_assignment(C[x,:,:].detach().cpu().numpy()) 
-                                    for x in range(num_graphs)])).to(device)
-                s_pred_mat_list = [make_perm_mat_pred(y_pred[:,1,:], num_nodes_t).to(device)]
+                with torch.no_grad():
+                    matchings = []
+                    B, N_s, N_t = perm_mat_list[0].size()
+                    n_points_sample = torch.zeros(B, dtype=torch.int).to(device)
+                    perm_mat_dec_list = [torch.zeros(B, N_s, N_t, dtype=torch.int).to(device)]
+                    cost_mask = torch.ones(B, N_s, N_t, dtype=torch.int).to(device)
+                    
+                    batch_idx = torch.arange(8)
+                    for i in range(N_t):
+                        s_pred_list = model(
+                            data_list,
+                            points_gt_list,
+                            edges_list,
+                            n_points_gt_list,
+                            n_points_sample,
+                            perm_mat_dec_list,
+                            in_training= False
+                        )
+                        scores = s_pred_list.view(B, N_s, N_t)
+                        
+                        #apply matched mask to matching scores
+                        scores[cost_mask == -1] = -torch.inf
+                        
+                        scores_per_batch = [scores[x,:,:] for x in range(B)]
+                        argmax_idx = [torch.argmax(sc) for sc in scores_per_batch]
+                        pair_idx = torch.tensor([(x // N_s, x % N_s) for x in  argmax_idx])
+                        
+                        # update mask of matched nodes
+                        cost_mask[batch_idx, pair_idx[:,0], :] = -1
+                        cost_mask[batch_idx, :, pair_idx[:,1]] = -1
+                        
+                        #update permutation matrix
+                        perm_mat_dec_list[0][batch_idx, pair_idx[:,0], pair_idx[:,1]] = 1
+                        #update numnber of points sampled
+                        n_points_sample += 1 
+                        
+                        matchings.append(pair_idx)
+                        
+                                        
+                    matchings = torch.stack(matchings, dim=2)
+                    sorted_values, sorted_indices = torch.sort(matchings[:, 0, :], dim=1)
+                    matchings[:,1, :] = matchings[:,1,sorted_indices][:,0]
+                    matchings[:,0, :] = sorted_values
+
+                s_pred_mat_list = [make_perm_mat_pred(matchings[:,1,:], num_nodes_t).to(device)]
                 tp, fp, fn = get_pos_neg_from_lists(s_pred_mat_list, perm_mat_list)
                 f1 = f1_score(tp, fp, fn)
                 acc, _, __ = matching_accuracy_from_lists(s_pred_mat_list, perm_mat_list)
@@ -274,13 +326,6 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         acc_dict["matching_accuracy"] = torch.mean(accs)
         acc_dict["f1_score"] = torch.mean(f1_scores)
 
-        # acc_table = [[x,y] for (x,y) in acc_dict.items()]
-        # f1_table = [[x,y] for (x,y) in f1_dict.items()]
-        # test_acc_table = wandb.Table(data= acc_table, columns = ["Class", "Accuracy"])
-        # test_f1_table = wandb.Table(data= f1_table, columns = ["Class", "F1-score"])
-        
-        # wandb.log({"Test Accuracy" :test_acc_table })
-        # wandb.log({"Test F1-score" :test_f1_table })
         wandb.log({"mean test_acc": torch.mean(accs), "mean test_f1": torch.mean(f1_scores)})
 
         scheduler.step()
@@ -349,7 +394,7 @@ if __name__ == "__main__":
     criterion = torch.nn.BCEWithLogitsLoss()
 
     backbone_params = list(model.node_layers.parameters()) + list(model.edge_layers.parameters())
-    backbone_params += list(model.final_layers.parameters())
+    # backbone_params += list(model.final_layers.parameters())
 
     backbone_ids = [id(item) for item in backbone_params]
 

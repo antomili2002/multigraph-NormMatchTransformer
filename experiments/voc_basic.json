@@ -23,7 +23,7 @@
   },
   "train_sampling": "intersection",
   "eval_sampling": "intersection",
-  "save_checkpoint": false,
+  "save_checkpoint": true,
   "RANDOM_SEED": 123,
   "warmstart_path": null,
   "TRAIN": {
@@ -35,14 +35,14 @@
     "random_swap": false,
     "AR": true
   },
-  "STATISTIC_STEP": 20,
+  "STATISTIC_STEP": 40,
   "TRACK_GRAD_NORM": false,
   "visualize": false,
   "visualization_params": {
     "reduced_vis": true
   },
   "evaluate_only": false,
-  "model_dir": "/work/ayadav/results/voc_basic/tf_unfreeze_test_globalvec_posenc",
+  "model_dir": "/work/ayadav/results/voc_basic/matchAR",
   "log_dir": "runs/",
   "MODEL_ARCH": "ar"
 }
