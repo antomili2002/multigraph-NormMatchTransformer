@@ -25,7 +25,7 @@ class HammingLoss(torch.nn.Module):
 
 lr_schedules = {
     #TODO: CHANGE BACK TO 10
-    "long_halving": (15, (2, 4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
+    "long_halving": (30, (2, 4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
     # "long_halving": (20, (2, 4, 15, 17, 20), 0.1),
     "short_halving": (2, (1,), 0.5),
     "long_nodrop": (10, (10,), 1.0),
@@ -98,7 +98,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
     if cfg.evaluate_only:
         assert resume
         print(f"Evaluating without training...")
-        accs, f1_scores = eval.eval_model(model, dataloader["test"], eval_epoch=5)
+        accs, f1_scores = eval.eval_model(model, dataloader["test"], eval_epoch=20)
         acc_dict = {
             "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.classes, accs)
         }
@@ -232,11 +232,16 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                         
                                         
                     matchings = torch.stack(matchings, dim=2)
-                    sorted_values, sorted_indices = torch.sort(matchings[:, 0, :], dim=1)
-                    matchings[:,1, :] = matchings[:,1,sorted_indices][:,0]
-                    matchings[:,0, :] = sorted_values
+                    matches = []
+                    for i in range(B):
+                        matching = matchings[i,:,:]
+                        sorted_values, sorted_indices = torch.sort(matching[0,:], dim=0)
+                        sorted_matches = matching[1, sorted_indices]
+                        matches.append(sorted_matches)
+                    matches = torch.stack(matches, dim=0)
 
-                s_pred_mat_list = [make_perm_mat_pred(matchings[:,1,:], num_nodes_t).to(device)]
+
+                s_pred_mat_list = [make_perm_mat_pred(matches, num_nodes_t).to(device)]
                 tp, fp, fn = get_pos_neg_from_lists(s_pred_mat_list, perm_mat_list)
                 f1 = f1_score(tp, fp, fn)
                 acc, _, __ = matching_accuracy_from_lists(s_pred_mat_list, perm_mat_list)
@@ -374,7 +379,7 @@ if __name__ == "__main__":
     }
     dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test")) for x in ("train", "test")}
 
-    torch.cuda.set_device(2)
+    torch.cuda.set_device(5)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if cfg.MODEL_ARCH == 'tf':

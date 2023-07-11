@@ -12,8 +12,8 @@
   },
   "Matching_TF": {
     "n_head": 4,
-    "n_encoder": 6,
-    "n_decoder": 4,
+    "n_encoder": 8,
+    "n_decoder": 8,
     "d_model": 512,
     "activation": "relu",
     "batch_norm": true,
@@ -42,7 +42,7 @@
     "reduced_vis": true
   },
   "evaluate_only": false,
-  "model_dir": "/work/ayadav/results/voc_basic/matchAR",
+  "model_dir": "/work/ayadav/results/voc_basic/matchAR_large",
   "log_dir": "runs/",
   "MODEL_ARCH": "ar"
 }

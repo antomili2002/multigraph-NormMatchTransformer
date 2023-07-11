@@ -70,7 +70,7 @@ def eval_model(model, dataloader, eval_epoch=None, verbose=False):
                 cost_mask = torch.ones(B, N_s, N_t, dtype=torch.int).to(device)
                 
                 batch_idx = torch.arange(8)
-                for i in range(N_t):
+                for np in range(N_t):
                     s_pred_list = model(
                         data_list,
                         points_gt,
@@ -102,12 +102,16 @@ def eval_model(model, dataloader, eval_epoch=None, verbose=False):
                     
                                     
                 matchings = torch.stack(matchings, dim=2)
-                sorted_values, sorted_indices = torch.sort(matchings[:, 0, :], dim=1)
-                matchings[:,1, :] = matchings[:,1,sorted_indices][:,0]
-                matchings[:,0, :] = sorted_values
+                matches = []
+                for example in range(B):
+                    matching = matchings[example,:,:]
+                    sorted_values, sorted_indices = torch.sort(matching[0,:], dim=0)
+                    sorted_matches = matching[1, sorted_indices]
+                    matches.append(sorted_matches)
+                matches = torch.stack(matches, dim=0)
 
             # evaluation metrics
-            s_pred_mat_list = [make_perm_mat_pred(matchings[:,1,:], num_nodes_t).to(device)]
+            s_pred_mat_list = [make_perm_mat_pred(matches, num_nodes_t).to(device)]
             _, _acc_match_num, _acc_total_num = matching_accuracy(s_pred_mat_list[0], perm_mat_list[0])
             _tp, _fp, _fn = get_pos_neg(s_pred_mat_list[0], perm_mat_list[0])
 
