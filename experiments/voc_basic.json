@@ -12,8 +12,8 @@
   },
   "Matching_TF": {
     "n_head": 4,
-    "n_encoder": 8,
-    "n_decoder": 8,
+    "n_encoder": 6,
+    "n_decoder": 1,
     "d_model": 512,
     "activation": "relu",
     "batch_norm": true,
@@ -23,7 +23,7 @@
   },
   "train_sampling": "intersection",
   "eval_sampling": "intersection",
-  "save_checkpoint": true,
+  "save_checkpoint": false,
   "RANDOM_SEED": 123,
   "warmstart_path": null,
   "TRAIN": {
@@ -35,7 +35,7 @@
     "random_swap": false,
     "AR": true
   },
-  "STATISTIC_STEP": 40,
+  "STATISTIC_STEP": 20,
   "TRACK_GRAD_NORM": false,
   "visualize": false,
   "visualization_params": {

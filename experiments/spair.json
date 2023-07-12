@@ -1,16 +1,14 @@
 {
   "default_json": "experiments/voc_basic.json",
   "DATASET_NAME": "SPair71k",
-  "model_dir": "results/spair",
+  "model_dir": "/work/ayadav/results/spair/ar/",
   "TRAIN": {
-    "EPOCH_ITERS": 400,
-    "difficulty_params": {
-    }
+    "EPOCH_ITERS": 2000,
+    "difficulty_params": {}
   },
   "EVAL": {
-    "SAMPLES": null,
-    "difficulty_params": {
-    }
+    "SAMPLES": 1000,
+    "difficulty_params": {}
   },
   "visualize": true,
   "visualization_params": {
