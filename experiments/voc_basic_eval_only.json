@@ -25,7 +25,7 @@
   "eval_sampling": "intersection",
   "save_checkpoint": false,
   "RANDOM_SEED": 123,
-  "warmstart_path": null,
+  "warmstart_path": "/work/ayadav/results/voc_basic/matchAR/params/0016/",
   "TRAIN": {
     "EPOCH_ITERS": 2000,
     "LR": 0.0002,
@@ -41,8 +41,8 @@
   "visualization_params": {
     "reduced_vis": true
   },
-  "evaluate_only": false,
-  "model_dir": "/work/ayadav/results/voc_basic/matchAR_test",
+  "evaluate_only": true,
+  "model_dir": "/work/ayadav/results/voc_basic/matchAR",
   "log_dir": "runs/",
   "MODEL_ARCH": "ar"
 }

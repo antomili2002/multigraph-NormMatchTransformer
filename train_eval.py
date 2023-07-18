@@ -9,6 +9,8 @@ from scipy.optimize import linear_sum_assignment
 import time
 from pathlib import Path
 import os
+import pandas as pd
+import matplotlib
 
 from data.data_loader_multigraph import GMDataset, get_dataloader
 from utils.evaluation_metric import matching_accuracy_from_lists, f1_score, get_pos_neg_from_lists, make_perm_mat_pred, make_sampled_perm_mat_pred
@@ -98,7 +100,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
     if cfg.evaluate_only:
         assert resume
         print(f"Evaluating without training...")
-        accs, f1_scores = eval.eval_model(model, dataloader["test"], eval_epoch=20)
+        accs, f1_scores, err_dict = eval.eval_model(model, dataloader["test"], eval_epoch=16)
         acc_dict = {
             "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.classes, accs)
         }
@@ -116,6 +118,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 time_elapsed // 3600, (time_elapsed // 60) % 60, time_elapsed % 60
             )
         )
+        err_dist_df = pd.DataFrame(err_dict)
         return model, acc_dict
 
     _, lr_milestones, lr_decay = lr_schedules[cfg.TRAIN.lr_schedule]
@@ -198,9 +201,15 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                     n_points_sample = torch.zeros(B, dtype=torch.int).to(device)
                     perm_mat_dec_list = [torch.zeros(B, N_s, N_t, dtype=torch.int).to(device)]
                     cost_mask = torch.ones(B, N_s, N_t, dtype=torch.int).to(device)
-                    
                     batch_idx = torch.arange(8)
-                    for i in range(N_t):
+
+                    # set matching score for padded to zero
+                    for batch in batch_idx:
+                        n_point = n_points_gt_list[0][batch]
+                        cost_mask[batch, n_point:, :] = -1
+                        cost_mask[batch, :, n_point:] = -1 # ?
+
+                    for np in range(N_t):
                         s_pred_list = model(
                             data_list,
                             points_gt_list,
@@ -232,19 +241,22 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                         
                                         
                     matchings = torch.stack(matchings, dim=2)
-                    matches = []
-                    for i in range(B):
-                        matching = matchings[i,:,:]
-                        sorted_values, sorted_indices = torch.sort(matching[0,:], dim=0)
-                        sorted_matches = matching[1, sorted_indices]
-                        matches.append(sorted_matches)
-                    matches = torch.stack(matches, dim=0)
-
-
-                s_pred_mat_list = [make_perm_mat_pred(matches, num_nodes_t).to(device)]
-                tp, fp, fn = get_pos_neg_from_lists(s_pred_mat_list, perm_mat_list)
-                f1 = f1_score(tp, fp, fn)
-                acc, _, __ = matching_accuracy_from_lists(s_pred_mat_list, perm_mat_list)
+                    matches_list = []
+                    s_pred_mat_list = []
+                    perm_mat_gt_list = []
+                    for batch in batch_idx:
+                        n_point = n_points_gt_list[0][batch]
+                        matched_idxes  = matchings[batch,:, :n_point]
+                        matches_list.append(matched_idxes)
+                        s_pred_mat = torch.zeros(n_point, N_t).to(perm_mat_list[0].device)
+                        s_pred_mat[matched_idxes[0,:], matched_idxes[1,:]] = 1
+                        s_pred_mat_list.append(s_pred_mat)
+                        perm_mat_gt_list.append(perm_mat_list[0][batch,:n_point, :n_point])
+                
+                # evaluation metrics
+                acc, _acc_match_num, _acc_total_num = matching_accuracy_from_lists(s_pred_mat_list, perm_mat_gt_list)
+                _tp, _fp, _fn = get_pos_neg_from_lists(s_pred_mat_list, perm_mat_gt_list)
+                f1 = f1_score(_tp, _fp, _fn)
 
                 # statistics
                 bs = perm_mat_list[0].size(0)
@@ -319,7 +331,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
 
         print()
         # Eval in each epoch
-        accs, f1_scores = eval.eval_model(model, dataloader["test"])
+        accs, f1_scores, _ = eval.eval_model(model, dataloader["test"])
         acc_dict = {
             "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.classes, accs)
         }
@@ -379,7 +391,7 @@ if __name__ == "__main__":
     }
     dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test")) for x in ("train", "test")}
 
-    torch.cuda.set_device(0)
+    torch.cuda.set_device(3)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if cfg.MODEL_ARCH == 'tf':
