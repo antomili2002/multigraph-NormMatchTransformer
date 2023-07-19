@@ -64,9 +64,11 @@ def mask_loss(perm_mat_list, sampled_points):
     perm_mat_mask = []
     B, N_s, N_t  = perm_mat_list[0].size()
 
-    for i in sampled_points:
-        mask = torch.ones(N_s, N_t)
+    for k, i in enumerate(sampled_points):
+        matched_ndx = torch.nonzero(perm_mat_list[0][k,:,:] == 1).squeeze()[:i].to(sampled_points.device)
+        mask = torch.ones(N_s, N_t).to(sampled_points.device)
         mask[:i,:] = torch.zeros(i, N_t)
+        mask[:,matched_ndx[:,1]] = torch.zeros(N_s, matched_ndx[:,1].size(0)).to(sampled_points.device)
         perm_mat_mask.append(mask)
     perm_mat_mask = torch.stack(perm_mat_mask, dim=0).to(sampled_points.device)
     return perm_mat_mask
@@ -100,7 +102,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
     if cfg.evaluate_only:
         assert resume
         print(f"Evaluating without training...")
-        accs, f1_scores, err_dict = eval.eval_model(model, dataloader["test"], eval_epoch=16)
+        accs, f1_scores, err_dict = eval.eval_model(model, dataloader["test"], eval_epoch=2)
         acc_dict = {
             "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.classes, accs)
         }
@@ -201,7 +203,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                     n_points_sample = torch.zeros(B, dtype=torch.int).to(device)
                     perm_mat_dec_list = [torch.zeros(B, N_s, N_t, dtype=torch.int).to(device)]
                     cost_mask = torch.ones(B, N_s, N_t, dtype=torch.int).to(device)
-                    batch_idx = torch.arange(8)
+                    batch_idx = torch.arange(cfg.BATCH_SIZE)
 
                     # set matching score for padded to zero
                     for batch in batch_idx:
@@ -248,7 +250,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                         n_point = n_points_gt_list[0][batch]
                         matched_idxes  = matchings[batch,:, :n_point]
                         matches_list.append(matched_idxes)
-                        s_pred_mat = torch.zeros(n_point, N_t).to(perm_mat_list[0].device)
+                        s_pred_mat = torch.zeros(n_point, n_point).to(perm_mat_list[0].device)
                         s_pred_mat[matched_idxes[0,:], matched_idxes[1,:]] = 1
                         s_pred_mat_list.append(s_pred_mat)
                         perm_mat_gt_list.append(perm_mat_list[0][batch,:n_point, :n_point])
@@ -331,19 +333,20 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
 
         print()
         # Eval in each epoch
-        accs, f1_scores, _ = eval.eval_model(model, dataloader["test"])
-        acc_dict = {
-            "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.classes, accs)
-        }
-        f1_dict = {
-            "f1_{}".format(cls): single_f1_score
-            for cls, single_f1_score in zip(dataloader["train"].dataset.classes, f1_scores)
-        }
-        acc_dict.update(f1_dict)
-        acc_dict["matching_accuracy"] = torch.mean(accs)
-        acc_dict["f1_score"] = torch.mean(f1_scores)
+        if (epoch+1) % 5 == 0 :
+            accs, f1_scores, _ = eval.eval_model(model, dataloader["test"])
+            acc_dict = {
+                "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.classes, accs)
+            }
+            f1_dict = {
+                "f1_{}".format(cls): single_f1_score
+                for cls, single_f1_score in zip(dataloader["train"].dataset.classes, f1_scores)
+            }
+            acc_dict.update(f1_dict)
+            acc_dict["matching_accuracy"] = torch.mean(accs)
+            acc_dict["f1_score"] = torch.mean(f1_scores)
 
-        wandb.log({"mean test_acc": torch.mean(accs), "mean test_f1": torch.mean(f1_scores)})
+        # wandb.log({"mean test_acc": torch.mean(accs), "mean test_f1": torch.mean(f1_scores)})
 
         scheduler.step()
 
@@ -391,7 +394,7 @@ if __name__ == "__main__":
     }
     dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test")) for x in ("train", "test")}
 
-    torch.cuda.set_device(3)
+    torch.cuda.set_device(5)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if cfg.MODEL_ARCH == 'tf':

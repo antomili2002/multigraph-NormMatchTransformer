@@ -25,7 +25,7 @@
   "eval_sampling": "intersection",
   "save_checkpoint": false,
   "RANDOM_SEED": 123,
-  "warmstart_path": "/work/ayadav/results/voc_basic/matchAR/params/0016/",
+  "warmstart_path": "/work/ayadav/results/voc_basic/matchAR_test/params/0002/",
   "TRAIN": {
     "EPOCH_ITERS": 2000,
     "LR": 0.0002,

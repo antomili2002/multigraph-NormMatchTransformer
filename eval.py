@@ -73,13 +73,13 @@ def eval_model(model, dataloader, eval_epoch=None, verbose=True):
                 n_points_sample = torch.zeros(B, dtype=torch.int).to(device)
                 perm_mat_dec_list = [torch.zeros(B, N_s, N_t, dtype=torch.int).to(device)]
                 cost_mask = torch.ones(B, N_s, N_t, dtype=torch.int).to(device)
-                batch_idx = torch.arange(8)
+                batch_idx = torch.arange(cfg.BATCH_SIZE)
             
                 # set matching score for padded to zero
                 for batch in batch_idx:
                     n_point = n_points_gt[0][batch]
                     cost_mask[batch, n_point:, :] = -1
-                    cost_mask[batch, :, :n_point] = -1
+                    cost_mask[batch, :, n_point:] = -1
                 
                 for np in range(N_t):
 
