@@ -13,9 +13,9 @@ __C.combine_classes = False
 # VOC2011-Keypoint Dataset
 # TODO: Hard-coded to absolute paths for debugging. Normal when running the code
 __C.VOC2011 = edict()
-__C.VOC2011.KPT_ANNO_DIR = "/home/ayadav/deep-graph-matching-transformers/data/downloaded/PascalVOC/annotations/"  # keypoint annotation
-__C.VOC2011.ROOT_DIR = "/home/ayadav/deep-graph-matching-transformers/data/downloaded/PascalVOC/VOC2011/"  # original VOC2011 dataset
-__C.VOC2011.SET_SPLIT = "/home/ayadav/deep-graph-matching-transformers/data/split/voc2011_pairs.npz"  # set split path
+__C.VOC2011.KPT_ANNO_DIR = "./data/downloaded/PascalVOC/annotations/"  # keypoint annotation
+__C.VOC2011.ROOT_DIR = "./data/downloaded/PascalVOC/VOC2011/"  # original VOC2011 dataset
+__C.VOC2011.SET_SPLIT = "./data/split/voc2011_pairs.npz"  # set split path
 __C.VOC2011.CLASSES = [
     "aeroplane",
     "bicycle",
@@ -92,5 +92,8 @@ __C.NORM_STD = [0.229, 0.224, 0.225]
 # Data cache path
 __C.CACHE_PATH = "data/cache"
 
+
+__C.train_sampling = "intersection"
+__C.eval_sampling = "intersection"
 # random seed used for data loading
 __C.RANDOM_SEED = 123

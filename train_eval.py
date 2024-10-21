@@ -1,6 +1,6 @@
 import torch
 import torch.optim as optim
-import wandb
+# import wandb
 
 from torch.utils.data import DataLoader, Subset
 from sklearn.model_selection import train_test_split
@@ -18,6 +18,9 @@ import eval
 from matchAR import Net, SimpleNet, EncoderNet, ResMatcherNet, MatchARNet
 from utils.config import cfg
 from utils.utils import update_params_from_cmdline, compute_grad_norm
+
+
+NUM_GPUS = 4
 
 class HammingLoss(torch.nn.Module):
     def forward(self, suggested, target):
@@ -304,7 +307,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                                 "grad_mlp_out": grad_mlp_out, "grad_mlp_query": grad_mlp_query, 
                                 "grad_encoder": grad_norm_encoder})
                     """
-                    wandb.log({"train_loss": loss_avg, "train_acc": acc_avg, "train_f1": f1_avg})
+                    # wandb.log({"train_loss": loss_avg, "train_acc": acc_avg, "train_f1": f1_avg})
 
                     running_acc = 0.0
                     running_f1 = 0.0
@@ -315,7 +318,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         epoch_acc = epoch_acc / dataset_size
         epoch_f1 = epoch_f1 / dataset_size
 
-        wandb.log({"ep_loss": epoch_loss, "ep_acc": epoch_acc, "ep_f1": epoch_f1})
+        # wandb.log({"ep_loss": epoch_loss, "ep_acc": epoch_acc, "ep_f1": epoch_f1})
 
 
         if cfg.save_checkpoint:
@@ -371,20 +374,20 @@ if __name__ == "__main__":
         json.dump(cfg, f)
     
     
-    wandb.init(
-    # set the wandb project where this run will be logged
-    project="matchAR",
+    # wandb.init(
+    # # set the wandb project where this run will be logged
+    # project="matchAR",
     
-    # track hyperparameters and run metadata
-    config={
-    "learning_rate": cfg.TRAIN.LR,
-    "architecture": cfg.MODEL_ARCH,
-    "dataset": cfg.DATASET_NAME,
-    "epochs": lr_schedules[cfg.TRAIN.lr_schedule][0],
-    "batch_size": cfg.BATCH_SIZE,
-    "cfg_full": cfg
-    }
-    )
+    # # track hyperparameters and run metadata
+    # config={
+    # "learning_rate": cfg.TRAIN.LR,
+    # "architecture": cfg.MODEL_ARCH,
+    # "dataset": cfg.DATASET_NAME,
+    # "epochs": lr_schedules[cfg.TRAIN.lr_schedule][0],
+    # "batch_size": cfg.BATCH_SIZE,
+    # "cfg_full": cfg
+    # }
+    # )
 
     torch.manual_seed(cfg.RANDOM_SEED)
 
@@ -394,7 +397,7 @@ if __name__ == "__main__":
     }
     dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test")) for x in ("train", "test")}
 
-    torch.cuda.set_device(5)
+    # torch.cuda.set_device(0)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if cfg.MODEL_ARCH == 'tf':
@@ -408,13 +411,17 @@ if __name__ == "__main__":
     elif cfg.MODEL_ARCH == 'ar':
         model = MatchARNet()
     
+    
     model = model.cuda()
 
 
     criterion = torch.nn.BCEWithLogitsLoss()
 
-    backbone_params = list(model.node_layers.parameters()) + list(model.edge_layers.parameters())
+    # print(model)
+    backbone_params = list(model.module.node_layers.parameters()) + list(model.module.edge_layers.parameters())
     # backbone_params += list(model.final_layers.parameters())
+    
+    
 
     backbone_ids = [id(item) for item in backbone_params]
 
