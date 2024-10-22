@@ -147,6 +147,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         running_since = time.time()
         iter_num = 0
 
+        print(len(dataloader["train"]))
         # Iterate over data.
         for inputs in dataloader["train"]:
             data_list = [_.cuda() for _ in inputs["images"]]
@@ -277,11 +278,11 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                     loss_avg = running_loss / cfg.STATISTIC_STEP / bs
                     acc_avg = running_acc / cfg.STATISTIC_STEP / bs
                     f1_avg = running_f1 / cfg.STATISTIC_STEP / bs
-                    print(
-                        "Epoch {:<4} Iter {:<4} {:>4.2f}sample/s Loss={:<8.4f} Accuracy={:<2.3} F1={:<2.3}".format(
-                            epoch, iter_num, running_speed, loss_avg, acc_avg, f1_avg
-                        )
-                    )
+                    # print(
+                    #     "Epoch {:<4} Iter {:<4} {:>4.2f}sample/s Loss={:<8.4f} Accuracy={:<2.3} F1={:<2.3}".format(
+                    #         epoch, iter_num, running_speed, loss_avg, acc_avg, f1_avg
+                    #     )
+                    # )
                     """
                     if cfg.MODEL_ARCH == 'tf':
                         grad_norm_model = compute_grad_norm(model.parameters())
@@ -397,7 +398,7 @@ if __name__ == "__main__":
     }
     dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test")) for x in ("train", "test")}
 
-    # torch.cuda.set_device(0)
+    torch.cuda.set_device(0)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if cfg.MODEL_ARCH == 'tf':
@@ -418,7 +419,7 @@ if __name__ == "__main__":
     criterion = torch.nn.BCEWithLogitsLoss()
 
     # print(model)
-    backbone_params = list(model.module.node_layers.parameters()) + list(model.module.edge_layers.parameters())
+    backbone_params = list(model.node_layers.parameters()) + list(model.edge_layers.parameters())
     # backbone_params += list(model.final_layers.parameters())
     
     
