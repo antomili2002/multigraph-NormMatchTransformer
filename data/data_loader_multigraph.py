@@ -18,12 +18,16 @@ datasets = {"PascalVOC": PascalVOC,
 
 class GMDataset(Dataset):
     def __init__(self, name, length, **args):
+        self.added_length = 0
         self.name = name
         self.ds = datasets[name](**args)
         self.true_epochs = length is None
+        print("TRUE EPOCHS: ", self.true_epochs)
+        print(length)
         self.length = (
             self.ds.total_size if self.true_epochs else length
         )  # NOTE images pairs are sampled randomly, so there is no exact definition of dataset size
+        # self.length = length
         if self.true_epochs:
             print(f"Initializing {self.ds.sets}-set with all {self.length} examples.")
         else:
@@ -35,6 +39,9 @@ class GMDataset(Dataset):
         self.cls = None
         #TODO: Hard-coded to 2 graphs  
         self.num_graphs_in_matching_instance = 2
+        
+        
+        self.added_data = []
 
     def set_cls(self, cls):
         if cls == "none":
@@ -45,9 +52,14 @@ class GMDataset(Dataset):
 
     def set_num_graphs(self, num_graphs_in_matching_instance):
         self.num_graphs_in_matching_instance = num_graphs_in_matching_instance
+        
+    def inject_new_data(self, new_data):
+        self.added_data.append[new_data]
+        self.added_length += 1
 
     def __len__(self):
-        return self.length
+        print("called")
+        return self.length + self.added_length
 
     def __getitem__(self, idx):
         sampling_strategy = cfg.train_sampling if self.ds.sets == "train" else cfg.eval_sampling
@@ -56,6 +68,7 @@ class GMDataset(Dataset):
 
         idx = idx if self.true_epochs else None
         anno_list, perm_mat_list = self.ds.get_k_samples(idx, k=self.num_graphs_in_matching_instance, cls=self.cls, mode=sampling_strategy)
+                
         """
         Implement Random Swap here
         """
@@ -71,7 +84,10 @@ class GMDataset(Dataset):
 
         points_gt = [np.array([(kp["x"], kp["y"]) for kp in anno_dict["keypoints"]]) for anno_dict in anno_list]
         n_points_gt = [len(p_gt) for p_gt in points_gt]
-
+        # print(points_gt)
+        # print("----------------------------------------------------------------")
+        # print(n_points_gt)
+        
         graph_list = []
         for p_gt, n_p_gt in zip(points_gt, n_points_gt):
             edge_indices, edge_features = build_graphs(p_gt, n_p_gt)
@@ -105,6 +121,67 @@ class GMDataset(Dataset):
             ret_dict["features"] = [torch.Tensor(x) for x in feat_list]
 
         return ret_dict
+        # if idx is not None:
+        #     if idx < self.length:
+        #         anno_list, perm_mat_list = self.ds.get_k_samples(idx, k=self.num_graphs_in_matching_instance, cls=self.cls, mode=sampling_strategy)
+                
+        #         """
+        #         Implement Random Swap here
+        #         """
+        #         for perm_mat in perm_mat_list:
+        #             if (
+        #                 not perm_mat.size
+        #                 or (perm_mat.size < 2 * 2 and sampling_strategy == "intersection")
+        #                 and not self.true_epochs
+        #             ):
+        #                 # 'and not self.true_epochs' because we assume all data is valid when sampling a true epoch
+        #                 next_idx = None if idx is None else idx + 1
+        #                 return self.__getitem__(next_idx)
+
+        #         points_gt = [np.array([(kp["x"], kp["y"]) for kp in anno_dict["keypoints"]]) for anno_dict in anno_list]
+        #         n_points_gt = [len(p_gt) for p_gt in points_gt]
+        #         # print(points_gt)
+        #         # print("----------------------------------------------------------------")
+        #         # print(n_points_gt)
+                
+        #         graph_list = []
+        #         for p_gt, n_p_gt in zip(points_gt, n_points_gt):
+        #             edge_indices, edge_features = build_graphs(p_gt, n_p_gt)
+
+        #             # Add dummy node features so the __slices__ of them is saved when creating a batch
+        #             pos = torch.tensor(p_gt).to(torch.float32) / 256.0
+        #             assert (pos > -1e-5).all(), p_gt
+        #             graph = Data(
+        #                 edge_attr=torch.tensor(edge_features).to(torch.float32),
+        #                 edge_index=torch.tensor(edge_indices, dtype=torch.long),
+        #                 x=pos,
+        #                 pos=pos,
+        #             )
+        #             graph.num_nodes = n_p_gt
+        #             graph_list.append(graph)
+
+        #         ret_dict = {
+        #             "Ps": [torch.Tensor(x) for x in points_gt],
+        #             "ns": [torch.tensor(x) for x in n_points_gt],
+        #             "gt_perm_mat": perm_mat_list,
+        #             "edges": graph_list,
+        #         }
+
+        #         imgs = [anno["image"] for anno in anno_list]
+        #         if imgs[0] is not None:
+        #             trans = transforms.Compose([transforms.ToTensor(), transforms.Normalize(cfg.NORM_MEANS, cfg.NORM_STD)])
+        #             imgs = [trans(img) for img in imgs]
+        #             ret_dict["images"] = imgs
+        #         elif "feat" in anno_list[0]["keypoints"][0]:
+        #             feat_list = [np.stack([kp["feat"] for kp in anno_dict["keypoints"]], axis=-1) for anno_dict in anno_list]
+        #             ret_dict["features"] = [torch.Tensor(x) for x in feat_list]
+
+        #         return ret_dict
+        #     else:
+        #         pass
+    
+    def inject_error_data(self, ret_dict, error_indices):
+        pass
 
 
 def collate_fn(data: list):
@@ -189,7 +266,7 @@ def get_dataloader(dataset, fix_seed=True, shuffle=False):
         dataset,
         batch_size=cfg.BATCH_SIZE,
         shuffle=shuffle,
-        num_workers=4,
+        num_workers=1,
         collate_fn=collate_fn,
         pin_memory=False,
         worker_init_fn=worker_init_fix if fix_seed else worker_init_rand,

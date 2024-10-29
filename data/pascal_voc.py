@@ -394,8 +394,8 @@ class PascalVOC:
                 kp_names_filtered = set(kp_names_1).intersection(kp_names_2)
                 anno_dict_1["keypoints"] = [kp for kp in anno_dict_1["keypoints"] if kp["name"] in kp_names_2]
                 anno_dict_2["keypoints"] = [kp for kp in anno_dict_2["keypoints"] if kp["name"] in kp_names_1]
-
                 anno_list = [anno_dict_1, anno_dict_2]
+                
                 for j in range(num_iterations):
                     if j > 2 * len(self.xml_list[cls]) or len(anno_list) == k:
                         break
@@ -429,7 +429,11 @@ class PascalVOC:
                 for j, _keypoint in enumerate(s2["keypoints"]):
                     if keypoint["name"] == _keypoint["name"]:
                         perm_mat_list[n][i, j] = 1
-
+        # print("----------------------------------------------------")
+        # print(anno_list)
+        # print("----------------------------------------------------")
+        # print(perm_mat_list)
+        # br
         return anno_list, perm_mat_list
 
     def get_pair_superset(self, cls=None, shuffle=True, num_iterations=200):

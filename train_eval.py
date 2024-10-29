@@ -77,6 +77,25 @@ def mask_loss(perm_mat_list, sampled_points):
     return perm_mat_mask
         
 
+def sample_errors(perm_mats, pred_mats, threshold=0.2):
+    """
+    Samples error cases where the prediction deviates significantly from the ground truth.
+    
+    Args:
+        perm_mats: Ground truth permutation matrices.
+        pred_mats: Predicted permutation matrices.
+        threshold: Error threshold to define an incorrect prediction.
+    
+    Returns:
+        error_samples: A list of indices where errors occurred.
+    """
+    error_samples = []
+    for i in range(perm_mats.shape[0]):  # Iterate over the batch
+        error = torch.sum(perm_mats[i] != pred_mats[i]) / perm_mats[i].numel()  # Error rate
+        if error > threshold:
+            error_samples.append(i)
+    return error_samples
+
 def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epochs, resume=False, start_epoch=0):
     print("Start training...")
 
@@ -147,7 +166,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         running_since = time.time()
         iter_num = 0
 
-        print(len(dataloader["train"]))
+        # print(len(dataloader["train"]))
         # Iterate over data.
         for inputs in dataloader["train"]:
             data_list = [_.cuda() for _ in inputs["images"]]
@@ -155,7 +174,21 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
             n_points_gt_list = [_.cuda() for _ in inputs["ns"]]
             edges_list = [_.to("cuda") for _ in inputs["edges"]]
             perm_mat_list = [perm_mat.cuda() for perm_mat in inputs["gt_perm_mat"]]
-
+            # print("**************************************     training     **************************************")
+            # # print(data_list)
+            # # print("----------------------------------------------------------------")
+            # print(len(points_gt_list), points_gt_list[0].size())
+            # print(points_gt_list)
+            # print("----------------------------------------------------------------")
+            # print(n_points_gt_list)
+            # br
+            # print("----------------------------------------------------------------")
+            # print(edges_list)
+            # br
+            # print("----------------------------------------------------------------")
+            # print(perm_mat_list)
+            # print("----------------------------------------------------------------")
+            
             # # randomly swap source and target images
             if cfg.TRAIN.random_swap:
                 for i in range(data_list[0].shape[0]):
@@ -171,12 +204,14 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                         points_gt_list = swap_src_tgt_order(points_gt_list, i)
                         n_points_gt_list = swap_src_tgt_order(n_points_gt_list, i)
                         edges_list = swap_src_tgt_order(edges_list, i)
-
+            # print(n_points_gt_list[0])
             n_points_gt_sample = n_points_gt_list[0].to('cpu').apply_(lambda x: torch.randint(low=0, high=x, size=(1,)).item()).to(device)
+            # print("--------------------------------")
+            # print(n_points_gt_sample)
             perm_mat_mask = mask_loss(perm_mat_list, n_points_gt_sample) > 0
             perm_mat_mask = torch.flatten(perm_mat_mask, 1, 2)
-
-
+            # print(perm_mat_mask)
+            # br
             num_graphs = points_gt_list[0].size(0)
             num_nodes_s = points_gt_list[0].size(1)
             num_nodes_t = points_gt_list[1].size(1)
@@ -187,10 +222,35 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
 
             with torch.set_grad_enabled(True):
                 # forward
+                
                 s_pred_list = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
+                if epoch >= 3:
+                    print(s_pred_list.size(), s_pred_list)
+                    print("################################################################################################")
+                    softMax = torch.nn.Softmax(dim=1)
+                    pred_test = softMax(s_pred_list)
+                    pred_test = pred_test.view(4, 11, 11)
+                    print(pred_test.size(), pred_test)
+                    print("################################################################################################")
+                    max_indices = torch.argmax(pred_test, dim=2)
+                    binary_tensor = torch.zeros_like(pred_test)
+                    binary_tensor.scatter_(2, max_indices.unsqueeze(2), 1.0)
+                    print(binary_tensor)
+                    print("################################################################################################")
+                    print(perm_mat_list[0].size(), perm_mat_list[0])
+                    print("################################################################################################")
+                    print(len(perm_mat_list))
+                    print("################################################################################################")
+                    print(perm_mat_list)
+                    br
                 y_gt = torch.flatten(perm_mat_list[0], 1, 2)
                 y_gt_masked = torch.masked_select(y_gt, perm_mat_mask)
                 s_pred_masked = torch.masked_select(s_pred_list, perm_mat_mask)
+                
+                # print(s_pred_masked.size(), s_pred_masked)
+                # print("################################################################################################")
+                # print(y_gt_masked.size(), y_gt_masked)
+                # br
                 
                 loss = criterion(s_pred_masked, y_gt_masked)
                 loss /= len(s_pred_list)

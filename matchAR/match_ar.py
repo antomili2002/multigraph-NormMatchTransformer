@@ -184,7 +184,13 @@ class MatchARNet(utils.backbone.VGG16_bn):
             query_mask = ~(s_mask[:,:-1].view(B, N_s, 1) & t_mask[:,:-1].view(B, 1, N_t))
             queries = make_queries(h_s[:,:-1,:], h_t[:,:-1,:])
         
-        queries = self.mlp(queries)
+        print("******************************** 11111111111111111111111111111 ********************************")
+        print(queries.size(), queries)
+        # queries : permutation matrix
+        queries = self.mlp(queries) # size: [1, 121, 1024] -> [1, 121, 512]
+        
+        print("******************************** 22222222222222222222222222222 ********************************")
+        print(queries.size(), queries)
         """
         queries = queries.view(B, N_s, N_t, -1)
         add match and mask_match encoding to relevant queries
@@ -204,6 +210,10 @@ class MatchARNet(utils.backbone.VGG16_bn):
         queries = queries.view(B, N_s * N_t, -1)
         """
         queries = self.update_queries(queries, n_points_sample, in_training, perm_mats=perm_mats)
+        
+        print("******************************** 33333333333333333333333333333333 ********************************")
+        print(queries.size(), queries)
+        
         query_mask = query_mask.view(B, -1)
         
         input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
