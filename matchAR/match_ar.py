@@ -215,7 +215,11 @@ class MatchARNet(utils.backbone.VGG16_bn):
         print(queries.size(), queries)
         
         query_mask = query_mask.view(B, -1)
+        print("******************************** 44444444444444444444444444444444 ********************************")
+        print(query_mask.size(), query_mask)
         
+        print("******************************** 55555555555555555555555555555555 ********************************")
+        print(S_mask.size(), S_mask)
         input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
         memory = self.tf_encoder(src=input, src_key_padding_mask=S_mask)
         decoded_queries = self.tf_decoder(tgt= queries,
@@ -224,6 +228,9 @@ class MatchARNet(utils.backbone.VGG16_bn):
                                           memory_key_padding_mask= S_mask)
         output = self.mlp_out(decoded_queries)
         
+        print("******************************** 6666666666666666666666666666666 ********************************")
+        print(output.size(), output)
+        br
         return output.squeeze(2)
 
         # loop
