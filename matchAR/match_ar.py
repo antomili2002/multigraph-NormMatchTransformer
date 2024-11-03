@@ -64,7 +64,7 @@ class MatchARNet(utils.backbone.VGG16_bn):
         self.tf_decoder = nn.TransformerDecoder(self.tf_decoder_layer, num_layers=cfg.Matching_TF.n_decoder)
         
         
-        self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024, 512, 256], 1, batch_norm=False)
+        self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024, 512, 256], 22, batch_norm=False)
         self.global_state_dim = 1024
 
         # matched encoding
@@ -114,15 +114,14 @@ class MatchARNet(utils.backbone.VGG16_bn):
         visualization_params=None,
         in_training=True
     ):
-        print("******************************** 11111111111111111111111111111 ********************************")
-        print(graphs)
-        print("******************************** 2222222222222222222222222222 ********************************")
-        print(points)
-        print("******************************** 3333333333333333333333333333 ********************************")
-        print(n_points)
-        print("******************************** 444444444444444444444444444 ********************************")
-        print(n_points_sample)
-        br
+        # print("******************************** 11111111111111111111111111111 ********************************")
+        # print(graphs)
+        # print("******************************** 2222222222222222222222222222 ********************************")
+        # print(points)
+        # print("******************************** 3333333333333333333333333333 ********************************")
+        # print(n_points)
+        # print("******************************** 444444444444444444444444444 ********************************")
+        # print(n_points_sample)
         batch_size = graphs[0].num_graphs
         global_list = []
         orig_graph_list = []
@@ -173,10 +172,23 @@ class MatchARNet(utils.backbone.VGG16_bn):
 
             orig_graph_list.append((h_res,mask))
 
+        # print("******************************** 6666666666666666666 ********************************")
+        # print(orig_graph_list[0][0].size(), orig_graph_list[0])
+        # print("******************************** 7777777777777777777 ********************************")
+        # print(orig_graph_list[1][0].size(), orig_graph_list[1])
+        
         h_s, s_mask = orig_graph_list[0]
         h_t, t_mask = orig_graph_list[1]
 
         assert h_s.size(0) == h_t.size(0), 'batch-sizes are not equal'
+        
+        print("******************************** EXPERIMENTS ********************************")
+        decoder_tensor_concat = torch.cat((h_s, h_t), dim=1)
+        print(decoder_tensor_concat.size(), decoder_tensor_concat)
+        
+        attn_mask = torch.triu(torch.ones(decoder_tensor_concat.size()[1], decoder_tensor_concat.size()[1]), diagonal=1).bool()
+
+        print(attn_mask.size(), attn_mask)
         (B, N_s, D), N_t = h_s.size(), h_t.size(1)
         
         S_mask = ~torch.cat((s_mask, t_mask), dim=1)
@@ -193,13 +205,13 @@ class MatchARNet(utils.backbone.VGG16_bn):
             query_mask = ~(s_mask[:,:-1].view(B, N_s, 1) & t_mask[:,:-1].view(B, 1, N_t))
             queries = make_queries(h_s[:,:-1,:], h_t[:,:-1,:])
         
-        print("******************************** 11111111111111111111111111111 ********************************")
-        print(queries.size(), queries)
+        # print("******************************** 11111111111111111111111111111 ********************************")
+        # print(queries.size(), queries)
         # queries : permutation matrix
         queries = self.mlp(queries) # size: [1, 121, 1024] -> [1, 121, 512]
         
-        print("******************************** 22222222222222222222222222222 ********************************")
-        print(queries.size(), queries)
+        # print("******************************** 22222222222222222222222222222 ********************************")
+        # print(queries.size(), queries)
         """
         queries = queries.view(B, N_s, N_t, -1)
         add match and mask_match encoding to relevant queries
@@ -220,26 +232,36 @@ class MatchARNet(utils.backbone.VGG16_bn):
         """
         queries = self.update_queries(queries, n_points_sample, in_training, perm_mats=perm_mats)
         
-        print("******************************** 33333333333333333333333333333333 ********************************")
-        print(queries.size(), queries)
+        # print("******************************** 33333333333333333333333333333333 ********************************")
+        # print(queries.size(), queries)
         
-        query_mask = query_mask.view(B, -1)
-        print("******************************** 44444444444444444444444444444444 ********************************")
-        print(query_mask.size(), query_mask)
+        # query_mask = query_mask.view(B, -1)
+        # print("******************************** 44444444444444444444444444444444 ********************************")
+        # print(query_mask.size(), query_mask)
         
-        print("******************************** 55555555555555555555555555555555 ********************************")
-        print(S_mask.size(), S_mask)
+        # print("******************************** 55555555555555555555555555555555 ********************************")
+        # print(S_mask.size(), S_mask)
         input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
         memory = self.tf_encoder(src=input, src_key_padding_mask=S_mask)
-        decoded_queries = self.tf_decoder(tgt= queries,
+        # decoded_queries = self.tf_decoder(tgt= queries,
+        #                                   memory=memory,
+        #                                   tgt_key_padding_mask= query_mask,
+        #                                   memory_key_padding_mask= S_mask)
+        decoded_queries = self.tf_decoder(tgt= decoder_tensor_concat,
                                           memory=memory,
-                                          tgt_key_padding_mask= query_mask,
-                                          memory_key_padding_mask= S_mask)
-        output = self.mlp_out(decoded_queries)
+                                          tgt_mask= attn_mask)
+        print("----------------------------------------------------------------")
+        print(decoded_queries.size(), decoded_queries)
         
-        print("******************************** 6666666666666666666666666666666 ********************************")
+        output = self.mlp_out(decoded_queries)
+        print("----------------------------------------------------------------")
+        
         print(output.size(), output)
         br
+        # print("******************************** 6666666666666666666666666666666 ********************************")
+        # print(output.size(), output)
+        
+        
         return output.squeeze(2)
 
         # loop
