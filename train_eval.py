@@ -96,6 +96,38 @@ def sample_errors(perm_mats, pred_mats, threshold=0.2):
             error_samples.append(i)
     return error_samples
 
+import torch
+
+def create_pred_mask(batch_size, n_points_list, target_length=30):
+    """
+    Creates a mask for each sample in the batch, setting the first and last elements to False
+    and a middle segment of length specified by `n_points_list` to True.
+
+    Parameters:
+    - batch_size: Number of samples in the batch.
+    - n_points_list: List of integers, where each integer specifies the number of points 
+                     to set as True in the middle of the mask for each batch sample.
+    - target_length: The length of each sequence.
+
+    Returns:
+    - A binary mask of shape [batch_size, target_length] with the specified pattern for each sample.
+    """
+    # Initialize the mask with all False
+    mask = torch.zeros((batch_size, target_length), dtype=torch.bool)
+    
+    for i in range(batch_size):
+        # Define the start and end indices for the True segment for each batch sample
+        n_points = n_points_list[i]
+        start_idx = n_points
+        end_idx = min(start_idx + n_points, target_length)
+        
+        # Set the middle section of n_points to True for this batch sample
+        mask[i, start_idx-1:end_idx-1] = True
+
+    return mask
+
+        
+
 def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epochs, resume=False, start_epoch=0):
     print("Start training...")
 
@@ -242,19 +274,47 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                     print(len(perm_mat_list))
                     print("################################################################################################")
                     print(perm_mat_list)
-                    br
-                y_gt = torch.flatten(perm_mat_list[0], 1, 2)
-                y_gt_masked = torch.masked_select(y_gt, perm_mat_mask)
-                s_pred_masked = torch.masked_select(s_pred_list, perm_mat_mask)
+                print("----------------------------------------------------------------")
+                print(s_pred_list.size(), s_pred_list)
+                print("----------------------------------------------------------------")
+                pred_mask = create_pred_mask(s_pred_list.size()[0], n_points_gt_list[0]).to(device)
+                print(pred_mask.size(), pred_mask)
+                print("----------------------------------------------------------------")
+                print("----------------------------------------------------------------")
+                pred_mask = pred_mask.unsqueeze(-1).expand_as(s_pred_list)
+                print(pred_mask.size(), pred_mask)
+                print("----------------------------------------------------------------")
+                print("----------------------------------------------------------------")
+                s_pred_list_masked = s_pred_list[pred_mask].view(-1, s_pred_list.size()[-1])
+                print(s_pred_list_masked.size(), s_pred_list_masked)
+                # print(output_masked.size(), output_masked)
+                # y_gt = torch.flatten(perm_mat_list[0], 1, 2)
+                print(perm_mat_list[0].size(), perm_mat_list[0])
+                # y_values = torch.argmax(perm_mat_list[0], dim=2)
+                has_one = perm_mat_list[0].sum(dim=2) != 0
+                expanded_mask = has_one.unsqueeze(-1).expand_as(perm_mat_list[0])
+                y_values = perm_mat_list[0].masked_select(expanded_mask).view(-1, perm_mat_list[0].size(2))
+                y_values = torch.argmax(y_values, dim=-1)
+                # y_values = y_values.view(-1)
+                
+                # print(perm_mat_list[0].size(), perm_mat_list[0])
+                # y_gt_masked = torch.masked_select(y_gt, perm_mat_mask)
+                # s_pred_masked = torch.masked_select(s_pred_list, perm_mat_mask)
                 
                 # print(s_pred_masked.size(), s_pred_masked)
                 # print("################################################################################################")
                 # print(y_gt_masked.size(), y_gt_masked)
                 # br
-                
-                loss = criterion(s_pred_masked, y_gt_masked)
+                print("################################################")
+                print(s_pred_list_masked.size(), s_pred_list_masked)
+                print("################################################")
+                print(y_values.size(), y_values)
+                loss = criterion(s_pred_list_masked, y_values)
+                print(loss)
                 loss /= len(s_pred_list)
-
+                print(loss)
+                br
+                
                 # backward + optimize
                 loss.backward()
                 if max_norm > 0:
@@ -476,7 +536,8 @@ if __name__ == "__main__":
     model = model.cuda()
 
 
-    criterion = torch.nn.BCEWithLogitsLoss()
+    # criterion = torch.nn.BCEWithLogitsLoss()
+    criterion = torch.nn.CrossEntropyLoss()
 
     # print(model)
     backbone_params = list(model.node_layers.parameters()) + list(model.edge_layers.parameters())

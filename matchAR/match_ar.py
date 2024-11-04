@@ -2,6 +2,7 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch_geometric.utils import to_dense_batch
 from scipy.optimize import linear_sum_assignment
 
@@ -38,6 +39,44 @@ def make_queries(h_s, h_t):
     
     return queries
 
+def pad_input(input_tensor, target_length=30):
+    """
+    Pads the input tensor to match the target length in the data point dimension.
+    
+    Parameters:
+    - input_tensor: Input tensor of shape [batch_size, current_length, feature_dim].
+    - target_length: The desired length for padding.
+
+    Returns:
+    - Padded tensor of shape [batch_size, target_length, feature_dim].
+    """
+    current_length = input_tensor.size(1)
+    if current_length >= target_length:
+        return input_tensor  # No padding needed if current length meets or exceeds target length
+
+    # Padding to the right along the data point dimension (dim=1)
+    padding_size = target_length - current_length
+    padded_tensor = F.pad(input_tensor, (0, 0, 0, padding_size), "constant", 0)
+    return padded_tensor
+
+def create_pad_mask(input_tensor, target_length=30):
+    """
+    Creates a mask for the input tensor based on the original length 
+    before padding. The mask will ignore padded values during loss calculation.
+    
+    Parameters:
+    - input_tensor: Original unpadded input tensor of shape [batch_size, current_length, feature_dim].
+    - target_length: The padded length (e.g., 30).
+
+    Returns:
+    - A binary mask of shape [batch_size, target_length] with 1s for real data points 
+      and 0s for padding.
+    """
+    batch_size, current_length, _ = input_tensor.size()
+    mask = torch.ones((batch_size, target_length), dtype=torch.bool)
+    mask[:, :current_length] = 0
+    return mask
+
 
 class MatchARNet(utils.backbone.VGG16_bn):
     def __init__(self):
@@ -64,7 +103,7 @@ class MatchARNet(utils.backbone.VGG16_bn):
         self.tf_decoder = nn.TransformerDecoder(self.tf_decoder_layer, num_layers=cfg.Matching_TF.n_decoder)
         
         
-        self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024, 512, 256], 22, batch_norm=False)
+        self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024, 512, 256], 30, batch_norm=False)
         self.global_state_dim = 1024
 
         # matched encoding
@@ -148,6 +187,8 @@ class MatchARNet(utils.backbone.VGG16_bn):
 
             # node + edge features from vgg
             vgg_features = self.vgg_to_node_dim(node_features)
+            # print(vgg_features.size(), vgg_features)
+            # br
             # splineCNN spatial features 
             h = self.psi(graph)
 
@@ -183,12 +224,16 @@ class MatchARNet(utils.backbone.VGG16_bn):
         assert h_s.size(0) == h_t.size(0), 'batch-sizes are not equal'
         
         print("******************************** EXPERIMENTS ********************************")
-        decoder_tensor_concat = torch.cat((h_s, h_t), dim=1)
-        print(decoder_tensor_concat.size(), decoder_tensor_concat)
+        decoder_tensor = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
+        decoder_tensor_pad_mask = create_pad_mask(decoder_tensor, target_length=30).to('cuda')
+        # print(decoder_tensor_pad_mask.size(), decoder_tensor_pad_mask)
+        decoder_tensor = pad_input(decoder_tensor, target_length=30)
+        # print(decoder_tensor.size(), decoder_tensor)
         
-        attn_mask = torch.triu(torch.ones(decoder_tensor_concat.size()[1], decoder_tensor_concat.size()[1]), diagonal=1).bool()
+        attn_mask = torch.triu(torch.ones(decoder_tensor.size()[1], decoder_tensor.size()[1]), diagonal=1).bool().to('cuda')
+    
 
-        print(attn_mask.size(), attn_mask)
+        # print(attn_mask.size(), attn_mask)
         (B, N_s, D), N_t = h_s.size(), h_t.size(1)
         
         S_mask = ~torch.cat((s_mask, t_mask), dim=1)
@@ -235,34 +280,43 @@ class MatchARNet(utils.backbone.VGG16_bn):
         # print("******************************** 33333333333333333333333333333333 ********************************")
         # print(queries.size(), queries)
         
-        # query_mask = query_mask.view(B, -1)
+        query_mask = query_mask.view(B, -1)
         # print("******************************** 44444444444444444444444444444444 ********************************")
         # print(query_mask.size(), query_mask)
         
         # print("******************************** 55555555555555555555555555555555 ********************************")
         # print(S_mask.size(), S_mask)
         input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
+        # print(input.size(), input)
+        # br
         memory = self.tf_encoder(src=input, src_key_padding_mask=S_mask)
         # decoded_queries = self.tf_decoder(tgt= queries,
         #                                   memory=memory,
         #                                   tgt_key_padding_mask= query_mask,
         #                                   memory_key_padding_mask= S_mask)
-        decoded_queries = self.tf_decoder(tgt= decoder_tensor_concat,
+        # print("******************************** DEVICES ********************************")
+        # print(decoder_tensor.get_device(), memory.get_device(), attn_mask.get_device(), decoder_tensor_pad_mask.get_device())
+        
+        decoded_queries = self.tf_decoder(tgt= decoder_tensor,
                                           memory=memory,
-                                          tgt_mask= attn_mask)
-        print("----------------------------------------------------------------")
-        print(decoded_queries.size(), decoded_queries)
+                                          tgt_mask= attn_mask,
+                                          tgt_key_padding_mask= decoder_tensor_pad_mask)
+        # print("----------------------------------------------------------------")
+        # print(decoded_queries.size(), decoded_queries)
         
         output = self.mlp_out(decoded_queries)
-        print("----------------------------------------------------------------")
-        
-        print(output.size(), output)
-        br
+        # print("******************************** 2222222222222222222222222222 ********************************")
+        # print(points)
+        print("******************************** 3333333333333333333333333333 ********************************")
+        print(n_points)
+        # print("----------------------------------------------------------------")
+        # print(output.size(), output)
+        # print("----------------------------------------------------------------")
         # print("******************************** 6666666666666666666666666666666 ********************************")
         # print(output.size(), output)
         
         
-        return output.squeeze(2)
+        return output
 
         # loop
         # matchings = []
