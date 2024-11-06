@@ -1,5 +1,6 @@
 import torch
 import torch.optim as optim
+import torch.nn.functional as F
 # import wandb
 
 from torch.utils.data import DataLoader, Subset
@@ -98,7 +99,7 @@ def sample_errors(perm_mats, pred_mats, threshold=0.2):
 
 import torch
 
-def create_pred_mask(batch_size, n_points_list, target_length=30):
+def create_pred_mask(batch_size, n_points_list, target_length=40):
     """
     Creates a mask for each sample in the batch, setting the first and last elements to False
     and a middle segment of length specified by `n_points_list` to True.
@@ -126,7 +127,16 @@ def create_pred_mask(batch_size, n_points_list, target_length=30):
 
     return mask
 
-        
+def split_tensor(tensor_1, tensor_2):
+    result = []
+    start_index = 0
+
+    for length in tensor_2:
+        end_index = start_index + length
+        result.append(tensor_1[start_index:end_index])
+        start_index = end_index
+
+    return result
 
 def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epochs, resume=False, start_epoch=0):
     print("Start training...")
@@ -178,10 +188,10 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         return model, acc_dict
 
     _, lr_milestones, lr_decay = lr_schedules[cfg.TRAIN.lr_schedule]
-    scheduler = optim.lr_scheduler.MultiStepLR(
-        optimizer, milestones=lr_milestones, gamma=lr_decay
-    )
-
+    # scheduler = optim.lr_scheduler.MultiStepLR(
+    #     optimizer, milestones=lr_milestones, gamma=lr_decay
+    # )
+    
     for epoch in range(start_epoch, num_epochs):
         print("Epoch {}/{}".format(epoch, num_epochs - 1))
         print("-" * 10)
@@ -189,6 +199,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
 
         print("lr = " + ", ".join(["{:.2e}".format(x["lr"]) for x in optimizer.param_groups]))
 
+        epoch_loss_2 = 0
         epoch_loss = 0.0
         running_loss = 0.0
         running_acc = 0.0
@@ -240,13 +251,13 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
             n_points_gt_sample = n_points_gt_list[0].to('cpu').apply_(lambda x: torch.randint(low=0, high=x, size=(1,)).item()).to(device)
             # print("--------------------------------")
             # print(n_points_gt_sample)
-            perm_mat_mask = mask_loss(perm_mat_list, n_points_gt_sample) > 0
-            perm_mat_mask = torch.flatten(perm_mat_mask, 1, 2)
+            # perm_mat_mask = mask_loss(perm_mat_list, n_points_gt_sample) > 0
+            # perm_mat_mask = torch.flatten(perm_mat_mask, 1, 2)
             # print(perm_mat_mask)
             # br
-            num_graphs = points_gt_list[0].size(0)
-            num_nodes_s = points_gt_list[0].size(1)
-            num_nodes_t = points_gt_list[1].size(1)
+            # num_graphs = points_gt_list[0].size(0)
+            # num_nodes_s = points_gt_list[0].size(1)
+            # num_nodes_t = points_gt_list[1].size(1)
             iter_num = iter_num + 1
 
             # zero the parameter gradients
@@ -256,40 +267,43 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 # forward
                 
                 s_pred_list = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
-                if epoch >= 3:
-                    print(s_pred_list.size(), s_pred_list)
-                    print("################################################################################################")
-                    softMax = torch.nn.Softmax(dim=1)
-                    pred_test = softMax(s_pred_list)
-                    pred_test = pred_test.view(4, 11, 11)
-                    print(pred_test.size(), pred_test)
-                    print("################################################################################################")
-                    max_indices = torch.argmax(pred_test, dim=2)
-                    binary_tensor = torch.zeros_like(pred_test)
-                    binary_tensor.scatter_(2, max_indices.unsqueeze(2), 1.0)
-                    print(binary_tensor)
-                    print("################################################################################################")
-                    print(perm_mat_list[0].size(), perm_mat_list[0])
-                    print("################################################################################################")
-                    print(len(perm_mat_list))
-                    print("################################################################################################")
-                    print(perm_mat_list)
-                print("----------------------------------------------------------------")
-                print(s_pred_list.size(), s_pred_list)
-                print("----------------------------------------------------------------")
+                # if epoch >= 3:
+                #     print(s_pred_list.size(), s_pred_list)
+                #     print("################################################################################################")
+                #     softMax = torch.nn.Softmax(dim=1)
+                #     pred_test = softMax(s_pred_list)
+                #     pred_test = pred_test.view(4, 11, 11)
+                #     print(pred_test.size(), pred_test)
+                #     print("################################################################################################")
+                #     max_indices = torch.argmax(pred_test, dim=2)
+                #     binary_tensor = torch.zeros_like(pred_test)
+                #     binary_tensor.scatter_(2, max_indices.unsqueeze(2), 1.0)
+                #     print(binary_tensor)
+                #     print("################################################################################################")
+                #     print(perm_mat_list[0].size(), perm_mat_list[0])
+                #     print("################################################################################################")
+                #     print(len(perm_mat_list))
+                #     print("################################################################################################")
+                # #     print(perm_mat_list)
+                # print("----------------------------------------------------------------")
+                # print(s_pred_list.size(), s_pred_list)
+                # print("----------------------------------------------------------------")
                 pred_mask = create_pred_mask(s_pred_list.size()[0], n_points_gt_list[0]).to(device)
-                print(pred_mask.size(), pred_mask)
-                print("----------------------------------------------------------------")
-                print("----------------------------------------------------------------")
+                # print(pred_mask.size(), pred_mask)
+                # print("----------------------------------------------------------------")
+                # print("----------------------------------------------------------------")
                 pred_mask = pred_mask.unsqueeze(-1).expand_as(s_pred_list)
-                print(pred_mask.size(), pred_mask)
-                print("----------------------------------------------------------------")
-                print("----------------------------------------------------------------")
+                # print(pred_mask.size(), pred_mask)
+                # print("----------------------------------------------------------------")
+                # print("----------------------------------------------------------------")
+                # print(s_pred_list[pred_mask].size(), s_pred_list[pred_mask])
+                # print("----------------------------------------------------------------")
+                # print("----------------------------------------------------------------")
                 s_pred_list_masked = s_pred_list[pred_mask].view(-1, s_pred_list.size()[-1])
-                print(s_pred_list_masked.size(), s_pred_list_masked)
+                # print(s_pred_list_masked.size(), s_pred_list_masked)
                 # print(output_masked.size(), output_masked)
                 # y_gt = torch.flatten(perm_mat_list[0], 1, 2)
-                print(perm_mat_list[0].size(), perm_mat_list[0])
+                # print(perm_mat_list[0].size(), perm_mat_list[0])
                 # y_values = torch.argmax(perm_mat_list[0], dim=2)
                 has_one = perm_mat_list[0].sum(dim=2) != 0
                 expanded_mask = has_one.unsqueeze(-1).expand_as(perm_mat_list[0])
@@ -305,181 +319,212 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 # print("################################################################################################")
                 # print(y_gt_masked.size(), y_gt_masked)
                 # br
-                print("################################################")
-                print(s_pred_list_masked.size(), s_pred_list_masked)
-                print("################################################")
-                print(y_values.size(), y_values)
-                loss = criterion(s_pred_list_masked, y_values)
-                print(loss)
-                loss /= len(s_pred_list)
-                print(loss)
-                br
                 
+                # print("################################################")
+                # print(s_pred_list_masked.size(), s_pred_list_masked)
+                y_preds = F.softmax(s_pred_list_masked, dim=-1)
+                y_preds = torch.argmax(y_preds,dim=-1)
+                # print(y_preds)
+                # print(y_values)
+                # print("################################################")
+                # print(y_values.size(), y_values)
+                loss = criterion(s_pred_list_masked, y_values)
+                # print(loss)
+                # loss /= len(s_pred_list)
+                # print(loss)
+                # epoch_loss_2 += loss.item()
                 # backward + optimize
                 loss.backward()
-                if max_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+                # if max_norm > 0:
+                #     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
                 optimizer.step()
 
-                with torch.no_grad():
-                    matchings = []
-                    B, N_s, N_t = perm_mat_list[0].size()
-                    n_points_sample = torch.zeros(B, dtype=torch.int).to(device)
-                    perm_mat_dec_list = [torch.zeros(B, N_s, N_t, dtype=torch.int).to(device)]
-                    cost_mask = torch.ones(B, N_s, N_t, dtype=torch.int).to(device)
-                    batch_idx = torch.arange(cfg.BATCH_SIZE)
+                # with torch.no_grad():
+                #     matchings = []
+                #     B, N_s, N_t = perm_mat_list[0].size()
+                #     # print(perm_mat_list[0].size(), perm_mat_list[0])
+                #     n_points_sample = torch.zeros(B, dtype=torch.int).to(device)
+                #     # perm_mat_dec_list = [torch.zeros(B, N_s, N_t, dtype=torch.int).to(device)]
+                #     # cost_mask = torch.ones(B, N_s, N_t, dtype=torch.int).to(device)
+                #     # batch_idx = torch.arange(cfg.BATCH_SIZE)
 
-                    # set matching score for padded to zero
-                    for batch in batch_idx:
-                        n_point = n_points_gt_list[0][batch]
-                        cost_mask[batch, n_point:, :] = -1
-                        cost_mask[batch, :, n_point:] = -1 # ?
-
-                    for np in range(N_t):
-                        s_pred_list = model(
-                            data_list,
-                            points_gt_list,
-                            edges_list,
-                            n_points_gt_list,
-                            n_points_sample,
-                            perm_mat_dec_list,
-                            in_training= False
-                        )
-                        scores = s_pred_list.view(B, N_s, N_t)
+                #     # set matching score for padded to zero
+                #     # for batch in batch_idx:
+                #     #     n_point = n_points_gt_list[0][batch]
+                #     #     cost_mask[batch, n_point:, :] = -1
+                #     #     cost_mask[batch, :, n_point:] = -1 # ?
+                #     eval_pred_points = []
+                #     for i in range(B):
+                #         a = []
+                #         eval_pred_points.append(a)
+                #     j_pred = 0
+                #     for np in range(N_t):
+                #         # print("EVAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+                #         s_pred_list = model(
+                #             data_list,
+                #             points_gt_list,
+                #             edges_list,
+                #             n_points_gt_list,
+                #             n_points_sample,
+                #             perm_mat_list,
+                #             eval_pred_points,
+                #             in_training= False
+                #         )
                         
-                        #apply matched mask to matching scores
-                        scores[cost_mask == -1] = -torch.inf
+                #         pred_mask = create_pred_mask(s_pred_list.size()[0], n_points_gt_list[0]).to(device)
+                #         # print("EVAAAAAAAL!")
+                #         # print(s_pred_list.size(), s_pred_list)
+                #         # print(pred_mask.size(), pred_mask)
+                #         pred_mask = pred_mask.unsqueeze(-1).expand_as(s_pred_list)
+                #         s_pred_list_masked = s_pred_list[pred_mask].view(-1, s_pred_list.size()[-1])
+                #         # print(s_pred_list_masked.size(), s_pred_list_masked)
+                #         pred_probabs = F.softmax(s_pred_list_masked, dim=-1)
+                #         y_preds = torch.argmax(pred_probabs, dim=-1)
+                #         # print(y_preds)
+                #         split_result = split_tensor(y_preds, n_points_gt_list[0])
+                #         # print(split_result)
                         
-                        scores_per_batch = [scores[x,:,:] for x in range(B)]
-                        argmax_idx = [torch.argmax(sc) for sc in scores_per_batch]
-                        pair_idx = torch.tensor([(x // N_s, x % N_s) for x in  argmax_idx])
+                #         for i in range(B):
+                #             if j_pred <= split_result[i].size()[0]-1:
+                #                 eval_pred_points[i].append(split_result[i][j_pred].item())
+                #         # print(eval_pred_points)
+                #         j_pred +=1
+                #         # scores = s_pred_list.view(B, N_s, N_t)
                         
-                        # update mask of matched nodes
-                        cost_mask[batch_idx, pair_idx[:,0], :] = -1
-                        cost_mask[batch_idx, :, pair_idx[:,1]] = -1
+                #         # #apply matched mask to matching scores
+                #         # scores[cost_mask == -1] = -torch.inf
                         
-                        #update permutation matrix
-                        perm_mat_dec_list[0][batch_idx, pair_idx[:,0], pair_idx[:,1]] = 1
-                        #update numnber of points sampled
-                        n_points_sample += 1 
+                #         # scores_per_batch = [scores[x,:,:] for x in range(B)]
+                #         # argmax_idx = [torch.argmax(sc) for sc in scores_per_batch]
+                #         # pair_idx = torch.tensor([(x // N_s, x % N_s) for x in  argmax_idx])
                         
-                        matchings.append(pair_idx)
+                #         # # update mask of matched nodes
+                #         # cost_mask[batch_idx, pair_idx[:,0], :] = -1
+                #         # cost_mask[batch_idx, :, pair_idx[:,1]] = -1
                         
+                #         # #update permutation matrix
+                #         # perm_mat_dec_list[0][batch_idx, pair_idx[:,0], pair_idx[:,1]] = 1
+                #         # #update numnber of points sampled
+                #         # n_points_sample += 1 
+                        
+                #         # matchings.append(pair_idx)
                                         
-                    matchings = torch.stack(matchings, dim=2)
-                    matches_list = []
-                    s_pred_mat_list = []
-                    perm_mat_gt_list = []
-                    for batch in batch_idx:
-                        n_point = n_points_gt_list[0][batch]
-                        matched_idxes  = matchings[batch,:, :n_point]
-                        matches_list.append(matched_idxes)
-                        s_pred_mat = torch.zeros(n_point, n_point).to(perm_mat_list[0].device)
-                        s_pred_mat[matched_idxes[0,:], matched_idxes[1,:]] = 1
-                        s_pred_mat_list.append(s_pred_mat)
-                        perm_mat_gt_list.append(perm_mat_list[0][batch,:n_point, :n_point])
+                #     matchings = torch.stack(matchings, dim=2)
+                #     matches_list = []
+                #     s_pred_mat_list = []
+                #     perm_mat_gt_list = []
+                #     for batch in batch_idx:
+                #         n_point = n_points_gt_list[0][batch]
+                #         matched_idxes  = matchings[batch,:, :n_point]
+                #         matches_list.append(matched_idxes)
+                #         s_pred_mat = torch.zeros(n_point, n_point).to(perm_mat_list[0].device)
+                #         s_pred_mat[matched_idxes[0,:], matched_idxes[1,:]] = 1
+                #         s_pred_mat_list.append(s_pred_mat)
+                #         perm_mat_gt_list.append(perm_mat_list[0][batch,:n_point, :n_point])
                 
                 # evaluation metrics
-                acc, _acc_match_num, _acc_total_num = matching_accuracy_from_lists(s_pred_mat_list, perm_mat_gt_list)
-                _tp, _fp, _fn = get_pos_neg_from_lists(s_pred_mat_list, perm_mat_gt_list)
-                f1 = f1_score(_tp, _fp, _fn)
+                # acc, _acc_match_num, _acc_total_num = matching_accuracy_from_lists(s_pred_mat_list, perm_mat_gt_list)
+                # _tp, _fp, _fn = get_pos_neg_from_lists(s_pred_mat_list, perm_mat_gt_list)
+                # f1 = f1_score(_tp, _fp, _fn)
 
-                # statistics
+                # # statistics
                 bs = perm_mat_list[0].size(0)
-                running_loss += loss.item() * bs  # multiply with batch size
+                # running_loss += loss.item() * bs  # multiply with batch size
                 epoch_loss += loss.item() * bs
-                running_acc += acc.item() * bs
-                epoch_acc += acc.item() * bs
-                running_f1 += f1.item() * bs
-                epoch_f1 += f1.item() * bs
+                # running_acc += acc.item() * bs
+                # epoch_acc += acc.item() * bs
+                # running_f1 += f1.item() * bs
+                # epoch_f1 += f1.item() * bs
 
-                if iter_num % cfg.STATISTIC_STEP == 0:
-                    running_speed = cfg.STATISTIC_STEP * bs / (time.time() - running_since)
-                    loss_avg = running_loss / cfg.STATISTIC_STEP / bs
-                    acc_avg = running_acc / cfg.STATISTIC_STEP / bs
-                    f1_avg = running_f1 / cfg.STATISTIC_STEP / bs
-                    # print(
-                    #     "Epoch {:<4} Iter {:<4} {:>4.2f}sample/s Loss={:<8.4f} Accuracy={:<2.3} F1={:<2.3}".format(
-                    #         epoch, iter_num, running_speed, loss_avg, acc_avg, f1_avg
-                    #     )
-                    # )
-                    """
-                    if cfg.MODEL_ARCH == 'tf':
-                        grad_norm_model = compute_grad_norm(model.parameters())
-                        grad_norm_splineCNN = compute_grad_norm(model.psi.parameters())
-                        grad_norm_encoder = compute_grad_norm(model.transformer.encoder.parameters())
-                        grad_norm_decoder = compute_grad_norm(model.transformer.decoder.parameters())
-                        grad_mlp_query = compute_grad_norm(model.mlp.parameters())
-                        grad_mlp_out = compute_grad_norm(model.mlp_out.parameters())
+                # if iter_num % cfg.STATISTIC_STEP == 0:
+                #     running_speed = cfg.STATISTIC_STEP * bs / (time.time() - running_since)
+                #     loss_avg = running_loss / cfg.STATISTIC_STEP / bs
+                #     acc_avg = running_acc / cfg.STATISTIC_STEP / bs
+                #     f1_avg = running_f1 / cfg.STATISTIC_STEP / bs
+                #     # print(
+                #     #     "Epoch {:<4} Iter {:<4} {:>4.2f}sample/s Loss={:<8.4f} Accuracy={:<2.3} F1={:<2.3}".format(
+                #     #         epoch, iter_num, running_speed, loss_avg, acc_avg, f1_avg
+                #     #     )
+                #     # )
+                #     """
+                #     if cfg.MODEL_ARCH == 'tf':
+                #         grad_norm_model = compute_grad_norm(model.parameters())
+                #         grad_norm_splineCNN = compute_grad_norm(model.psi.parameters())
+                #         grad_norm_encoder = compute_grad_norm(model.transformer.encoder.parameters())
+                #         grad_norm_decoder = compute_grad_norm(model.transformer.decoder.parameters())
+                #         grad_mlp_query = compute_grad_norm(model.mlp.parameters())
+                #         grad_mlp_out = compute_grad_norm(model.mlp_out.parameters())
 
-                        wandb.log({"train_loss": loss_avg, "train_acc": acc_avg, "train_f1": f1_avg, 
-                                "grad_model": grad_norm_model, "grad_splineCNN": grad_norm_splineCNN,  
-                                    "grad_mlp_out": grad_mlp_out, "grad_mlp_query": grad_mlp_query, 
-                                    "grad_encoder": grad_norm_encoder, "grad_decoder": grad_norm_decoder})
-                    else:
-                        grad_norm_model = compute_grad_norm(model.parameters())
-                        grad_norm_splineCNN = compute_grad_norm(model.psi.parameters())
-                        grad_norm_encoder = compute_grad_norm(model.encoder.parameters())
-                        grad_mlp_query = compute_grad_norm(model.mlp.parameters())
-                        grad_mlp_out = compute_grad_norm(model.mlp_out.parameters())
+                #         wandb.log({"train_loss": loss_avg, "train_acc": acc_avg, "train_f1": f1_avg, 
+                #                 "grad_model": grad_norm_model, "grad_splineCNN": grad_norm_splineCNN,  
+                #                     "grad_mlp_out": grad_mlp_out, "grad_mlp_query": grad_mlp_query, 
+                #                     "grad_encoder": grad_norm_encoder, "grad_decoder": grad_norm_decoder})
+                #     else:
+                #         grad_norm_model = compute_grad_norm(model.parameters())
+                #         grad_norm_splineCNN = compute_grad_norm(model.psi.parameters())
+                #         grad_norm_encoder = compute_grad_norm(model.encoder.parameters())
+                #         grad_mlp_query = compute_grad_norm(model.mlp.parameters())
+                #         grad_mlp_out = compute_grad_norm(model.mlp_out.parameters())
 
-                        wandb.log({"train_loss": loss_avg, "train_acc": acc_avg, "train_f1": f1_avg, 
-                                "grad_model": grad_norm_model, "grad_splineCNN": grad_norm_splineCNN,  
-                                "grad_mlp_out": grad_mlp_out, "grad_mlp_query": grad_mlp_query, 
-                                "grad_encoder": grad_norm_encoder})
-                    """
-                    # wandb.log({"train_loss": loss_avg, "train_acc": acc_avg, "train_f1": f1_avg})
+                #         wandb.log({"train_loss": loss_avg, "train_acc": acc_avg, "train_f1": f1_avg, 
+                #                 "grad_model": grad_norm_model, "grad_splineCNN": grad_norm_splineCNN,  
+                #                 "grad_mlp_out": grad_mlp_out, "grad_mlp_query": grad_mlp_query, 
+                #                 "grad_encoder": grad_norm_encoder})
+                #     """
+                #     # wandb.log({"train_loss": loss_avg, "train_acc": acc_avg, "train_f1": f1_avg})
 
-                    running_acc = 0.0
-                    running_f1 = 0.0
-                    running_loss = 0.0
-                    running_since = time.time()
+                #     running_acc = 0.0
+                #     running_f1 = 0.0
+                #     running_loss = 0.0
+                #     running_since = time.time()
 
         epoch_loss = epoch_loss / dataset_size
-        epoch_acc = epoch_acc / dataset_size
-        epoch_f1 = epoch_f1 / dataset_size
+        print("epoch_loss: ", epoch_loss)
+        # epoch_acc = epoch_acc / dataset_size
+        # epoch_f1 = epoch_f1 / dataset_size
 
-        # wandb.log({"ep_loss": epoch_loss, "ep_acc": epoch_acc, "ep_f1": epoch_f1})
+        # # wandb.log({"ep_loss": epoch_loss, "ep_acc": epoch_acc, "ep_f1": epoch_f1})
 
 
-        if cfg.save_checkpoint:
-            base_path = Path(checkpoint_path / "{:04}".format(epoch + 1))
-            Path(base_path).mkdir(parents=True, exist_ok=True)
-            path = str(base_path / "params.pt")
-            torch.save(model.state_dict(), path)
-            torch.save(optimizer.state_dict(), str(base_path / "optim.pt"))
+        # if cfg.save_checkpoint:
+        #     base_path = Path(checkpoint_path / "{:04}".format(epoch + 1))
+        #     Path(base_path).mkdir(parents=True, exist_ok=True)
+        #     path = str(base_path / "params.pt")
+        #     torch.save(model.state_dict(), path)
+        #     torch.save(optimizer.state_dict(), str(base_path / "optim.pt"))
 
-        print(
-            "Over whole epoch {:<4} -------- Loss: {:.4f} Accuracy: {:.3f} F1: {:.3f}".format(
-                epoch, epoch_loss, epoch_acc, epoch_f1
-            )
-        )
+        # print(
+        #     "Over whole epoch {:<4} -------- Loss: {:.4f} Accuracy: {:.3f} F1: {:.3f}".format(
+        #         epoch, epoch_loss, epoch_acc, epoch_f1
+        #     )
+        # )
 
-        print()
-        # Eval in each epoch
-        if (epoch+1) % 5 == 0 :
-            accs, f1_scores, _ = eval.eval_model(model, dataloader["test"])
-            acc_dict = {
-                "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.classes, accs)
-            }
-            f1_dict = {
-                "f1_{}".format(cls): single_f1_score
-                for cls, single_f1_score in zip(dataloader["train"].dataset.classes, f1_scores)
-            }
-            acc_dict.update(f1_dict)
-            acc_dict["matching_accuracy"] = torch.mean(accs)
-            acc_dict["f1_score"] = torch.mean(f1_scores)
+        # print()
+        # # Eval in each epoch
+        # if (epoch+1) % 5 == 0 :
+        #     accs, f1_scores, _ = eval.eval_model(model, dataloader["test"])
+        #     acc_dict = {
+        #         "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.classes, accs)
+        #     }
+        #     f1_dict = {
+        #         "f1_{}".format(cls): single_f1_score
+        #         for cls, single_f1_score in zip(dataloader["train"].dataset.classes, f1_scores)
+        #     }
+        #     acc_dict.update(f1_dict)
+        #     acc_dict["matching_accuracy"] = torch.mean(accs)
+        #     acc_dict["f1_score"] = torch.mean(f1_scores)
 
-        # wandb.log({"mean test_acc": torch.mean(accs), "mean test_f1": torch.mean(f1_scores)})
+        # # wandb.log({"mean test_acc": torch.mean(accs), "mean test_f1": torch.mean(f1_scores)})
+        # avg_loss_2 = epoch_loss_2 / len(dataloader["train"])
+        # print("avg loss:", avg_loss_2)
+        # scheduler.step()
 
-        scheduler.step()
-
-    time_elapsed = time.time() - since
-    print(
-        "Training complete in {:.0f}h {:.0f}m {:.0f}s".format(
-            time_elapsed // 3600, (time_elapsed // 60) % 60, time_elapsed % 60
-        )
-    )
+    # time_elapsed = time.time() - since
+    # print(
+    #     "Training complete in {:.0f}h {:.0f}m {:.0f}s".format(
+    #         time_elapsed // 3600, (time_elapsed // 60) % 60, time_elapsed % 60
+    #     )
+    # )
 
     return model, acc_dict
 
@@ -552,7 +597,7 @@ if __name__ == "__main__":
         dict(params=backbone_params, lr=cfg.TRAIN.LR * 0.01),
         dict(params=new_params, lr=cfg.TRAIN.LR),
     ]
-    optimizer = optim.RAdam(opt_params)
+    optimizer = optim.RAdam(params=opt_params, lr=cfg.TRAIN.LR)
 
     if not Path(cfg.model_dir).exists():
         Path(cfg.model_dir).mkdir(parents=True)
