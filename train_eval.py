@@ -188,9 +188,9 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         return model, acc_dict
 
     _, lr_milestones, lr_decay = lr_schedules[cfg.TRAIN.lr_schedule]
-    # scheduler = optim.lr_scheduler.MultiStepLR(
-    #     optimizer, milestones=lr_milestones, gamma=lr_decay
-    # )
+    scheduler = optim.lr_scheduler.MultiStepLR(
+        optimizer, milestones=lr_milestones, gamma=lr_decay
+    )
     
     for epoch in range(start_epoch, num_epochs):
         print("Epoch {}/{}".format(epoch, num_epochs - 1))
@@ -322,8 +322,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 
                 # print("################################################")
                 # print(s_pred_list_masked.size(), s_pred_list_masked)
-                y_preds = F.softmax(s_pred_list_masked, dim=-1)
-                y_preds = torch.argmax(y_preds,dim=-1)
+                # y_preds = F.softmax(s_pred_list_masked, dim=-1)
+                # y_preds = torch.argmax(y_preds,dim=-1)
                 # print(y_preds)
                 # print(y_values)
                 # print("################################################")
@@ -335,8 +335,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 # epoch_loss_2 += loss.item()
                 # backward + optimize
                 loss.backward()
-                # if max_norm > 0:
-                #     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+                if max_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
                 optimizer.step()
 
                 # with torch.no_grad():
@@ -517,7 +517,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         # # wandb.log({"mean test_acc": torch.mean(accs), "mean test_f1": torch.mean(f1_scores)})
         # avg_loss_2 = epoch_loss_2 / len(dataloader["train"])
         # print("avg loss:", avg_loss_2)
-        # scheduler.step()
+        scheduler.step()
 
     # time_elapsed = time.time() - since
     # print(
@@ -597,7 +597,7 @@ if __name__ == "__main__":
         dict(params=backbone_params, lr=cfg.TRAIN.LR * 0.01),
         dict(params=new_params, lr=cfg.TRAIN.LR),
     ]
-    optimizer = optim.RAdam(params=opt_params, lr=cfg.TRAIN.LR)
+    optimizer = optim.RAdam(opt_params)
 
     if not Path(cfg.model_dir).exists():
         Path(cfg.model_dir).mkdir(parents=True)
