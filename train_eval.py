@@ -582,7 +582,7 @@ if __name__ == "__main__":
 
 
     # criterion = torch.nn.BCEWithLogitsLoss()
-    criterion = torch.nn.CrossEntropyLoss()
+    criterion = torch.nn.CosineEmbeddingLoss()
 
     # print(model)
     backbone_params = list(model.node_layers.parameters()) + list(model.edge_layers.parameters())

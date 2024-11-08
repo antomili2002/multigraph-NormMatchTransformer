@@ -58,7 +58,6 @@ class GMDataset(Dataset):
         self.added_length += 1
 
     def __len__(self):
-        print("called")
         return self.length + self.added_length
 
     def __getitem__(self, idx):
