@@ -61,35 +61,78 @@ import numpy as np
 # print(output)
 # output.backward()
 torch.manual_seed(1)
-loss = torch.nn.CosineEmbeddingLoss(reduction='mean')
-input1 = torch.randn(1, 5, requires_grad=True)
-input2 = torch.randn(3, 5, requires_grad=True)
-target = torch.tensor([1, -1 ,-1])
 
-print(input1)
-print(input2)
-print(target)
-output = loss(input1, input2, target)
-print(output.item())
-output.backward()
+batch_size = 4
+num_points1 = 2  # number of points in input1 per batch
+num_points2 = 3  # number of points in input2 per batch
+feature_dim = 5
 
-print(input1[0])
+input1 = torch.randn(batch_size, num_points1, feature_dim, requires_grad=True)
+input2 = torch.randn(batch_size, num_points2, feature_dim, requires_grad=True)
+target = torch.tensor([[[1, -1, -1], [-1, 1, -1]]] * batch_size)
 
+# Initialize total loss
+total_loss = 0
 
 
-o1 = F.cosine_similarity(input1[0], input2[0], dim=0).item()
-o1 = 1 - o1
-print(o1)
+for b in range(batch_size):
+    batch_loss = 0
+    for i in range(num_points1):
+        # Compute cosine similarity of input1[b, i] with all points in input2[b]
+        cosine_similarities = F.cosine_similarity(input1[b, i].unsqueeze(0), input2[b])
+        
+        # Apply target for this specific input1[b, i] row
+        losses = torch.where(target[b, i] == 1, 1 - cosine_similarities, torch.clamp(cosine_similarities, min=0))
+        
+        # Accumulate the mean loss for this input1[b, i] with all points in input2[b]
+        batch_loss += losses.mean()
+        
+    # Average loss across all points in input1 for the batch and accumulate
+    total_loss += batch_loss / num_points1
 
-o2 = F.cosine_similarity(input1[0], input2[1], dim=0).item()
-o2 = max(0, o2)
-print(o2)
+# Average loss across the entire batch
+final_loss = total_loss / batch_size
+final_loss.backward()
+print("Custom Cosine Embedding Loss with batch dimension:", final_loss.item())
 
-o3 = F.cosine_similarity(input1[0], input2[2], dim=0).item()
-o3 = max(0, o3)
-print(o2)
+# Backward pass
 
-print(np.mean([o1,o2,o3]))
+# Backward pass
 
 
-print((1 - torch.triu(torch.ones((1, 5, 10)), diagonal=1)).bool())
+
+# o1 = F.cosine_similarity(input1[0], input2[0], dim=0).item()
+# o1 = 1 - o1
+# # print(o1)
+
+# o2 = F.cosine_similarity(input1[0], input2[1], dim=0).item()
+# o2 = max(0, o2)
+# # print(o2)
+
+# o3 = F.cosine_similarity(input1[0], input2[2], dim=0).item()
+# o3 = max(0, o3)
+# # print(o2)
+
+# o1_2 = F.cosine_similarity(input1[1], input2[0], dim=0).item()
+# o1_2 = max(0, o1_2)
+# # print(o1_2)
+
+# o2_2 = F.cosine_similarity(input1[1], input2[1], dim=0).item()
+# o2_2 = 1 - o2_2
+# # print(o2_2)
+
+# o3_2 = F.cosine_similarity(input1[1], input2[2], dim=0).item()
+# o3_2 = max(0, o3_2)
+# # print(o3_2)
+
+
+# p1 = np.mean([o1,o2,o3])
+# p2 = np.mean([o1_2,o2_2,o3_2])
+
+# print(p1)
+# print(p2)
+# print((p1+p2)/2)
+
+print()
+
+# print((1 - torch.triu(torch.ones((1, 5, 10)), diagonal=1)).bool())

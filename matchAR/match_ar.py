@@ -59,23 +59,31 @@ def pad_input(input_tensor, target_length=40):
     padded_tensor = F.pad(input_tensor, (0, 0, 0, padding_size), "constant", 0)
     return padded_tensor
 
-def create_pad_mask(input_tensor, target_length=40):
+def create_source_masks(source_points, n_points, max_length=40):
     """
-    Creates a mask for the input tensor based on the original length 
-    before padding. The mask will ignore padded values during loss calculation.
-    
+    Create masks for the source points tensor used in the TransformerDecoder.
+
     Parameters:
-    - input_tensor: Original unpadded input tensor of shape [batch_size, current_length, feature_dim].
-    - target_length: The padded length (e.g., 40).
+    - source_points: Tensor of shape [batch_size, seq_len, feature_dim].
+    - n_points: List or tensor indicating the original length of each sequence before padding.
+    - max_length: The maximum sequence length (after padding).
 
     Returns:
-    - A binary mask of shape [batch_size, target_length] with 1s for real data points 
-      and 0s for padding.
+    - source_points_mask: Upper triangular mask of shape [seq_len, seq_len] (or None if not needed).
+    - source_key_padding_mask: Padding mask of shape [batch_size, max_length].
     """
-    batch_size, current_length, _ = input_tensor.size()
-    mask = torch.ones((batch_size, target_length), dtype=torch.bool)
-    mask[:, :current_length] = 0
-    return mask
+    batch_size, seq_len, _ = source_points.size()
+
+    # Create target mask (if needed for causal attention)
+    source_points_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1).to(source_points.device)
+
+    # Create key padding mask for source points
+    source_key_padding_mask = torch.zeros((batch_size, max_length), dtype=torch.bool, device=source_points.device)
+    for i, length in enumerate(n_points):
+        source_key_padding_mask[i, length:] = True  # Mark padding positions with True
+
+    return source_points_mask, source_key_padding_mask
+
 
 
 class MatchARNet(utils.backbone.VGG16_bn):
@@ -103,7 +111,7 @@ class MatchARNet(utils.backbone.VGG16_bn):
         self.tf_decoder = nn.TransformerDecoder(self.tf_decoder_layer, num_layers=cfg.Matching_TF.n_decoder)
         
         
-        self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024, 512, 256], 40, batch_norm=False)
+        self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024, 512, 256], 512, batch_norm=False)
         self.global_state_dim = 1024
 
         # matched encoding
@@ -201,7 +209,20 @@ class MatchARNet(utils.backbone.VGG16_bn):
 
         assert h_s.size(0) == h_t.size(0), 'batch-sizes are not equal'
         
+        # if cfg.Matching_TF.global_feat != True:
+        #     (B, N_s, D), N_t = h_s.size(), h_t.size(1)
+        #     query_mask = ~(s_mask.view(B, N_s, 1) & t_mask.view(B, 1, N_t))
+        #     queries = make_queries(h_s, h_t)
+
+        # else:
+        #     (B, N_s, D), N_t = h_s.size(), h_t.size(1)
+        #     N_s -= 1
+        #     N_t -= 1 
+        #     query_mask = ~(s_mask[:,:-1].view(B, N_s, 1) & t_mask[:,:-1].view(B, 1, N_t))
+        #     queries = make_queries(h_s[:,:-1,:], h_t[:,:-1,:])
         
+        # query_mask = query_mask.view(B, -1)
+        # print(query_mask.size(), query_mask)
         
         S_mask = ~torch.cat((s_mask, t_mask), dim=1)
         input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
@@ -211,19 +232,22 @@ class MatchARNet(utils.backbone.VGG16_bn):
         sample_size_each = encoder_output.size()[1] // 2 #Get the amount of concatenated points
         
         #split context sensitiv output from encoder into source and target patches
-        source_points = encoder_output[:, :sample_size_each, :]
-        target_points = encoder_output[:, sample_size_each:, :]
+        source_points = encoder_output[:, :sample_size_each, :].to('cuda')
+        target_points = encoder_output[:, sample_size_each:, :].to('cuda')
         
-        #define mask for masked-attention
-        source_points_mask = (1 - torch.triu(torch.ones((batch_size, sample_size_each, cfg.Matching_TF.d_model)), diagonal=1)).bool()
-        
+        batch_size, seq_len, _ = source_points.size()
+        source_points_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1).to(source_points.device)#(1 - torch.triu(torch.ones((batch_size, sample_size_each, sample_size_each)), diagonal=1)).bool()
+        # print(source_points.size())
+        # print(source_points_mask.size())
+        # print(target_points.size(), target_points)
+        # print(source_points.size(),source_points) 
         decoder_output = self.tf_decoder(tgt= source_points,
                                           memory= target_points,
-                                          tgt_mask= source_points_mask) # TODO: tgt_key_padding_mask ?
+                                          tgt_mask=source_points_mask) # TODO: tgt_key_padding_mask=query_mask ?
         
-        #TODO: test if with MLP and batchnorm or not
-        decoder_output = self.mlp(decoder_output)
-        
+        #TODO: test if with MLP and batchnorm or not / leave out mlp
+        # print(decoder_output)
+        decoder_output = self.mlp_out(decoder_output)
         
         if in_training:
             return target_points, decoder_output

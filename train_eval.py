@@ -3,7 +3,10 @@ import torch.optim as optim
 import torch.nn.functional as F
 # import wandb
 
-from torch.utils.data import DataLoader, Subset
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+from torch.utils.data import DataLoader, Subset, DistributedSampler
 from sklearn.model_selection import train_test_split
 import numpy as np
 from scipy.optimize import linear_sum_assignment
@@ -21,8 +24,6 @@ from utils.config import cfg
 from utils.utils import update_params_from_cmdline, compute_grad_norm
 
 
-NUM_GPUS = 4
-
 class HammingLoss(torch.nn.Module):
     def forward(self, suggested, target):
         errors = suggested * (1.0 - target) + (1.0 - suggested) * target
@@ -31,8 +32,8 @@ class HammingLoss(torch.nn.Module):
 
 lr_schedules = {
     #TODO: CHANGE BACK TO 10
-    "long_halving": (30, (2, 4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
-    # "long_halving": (20, (2, 4, 15, 17, 20), 0.1),
+    # "long_halving": (30, (2, 4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
+    "long_halving": (32, (11, 17, 23, 29), 0.1),
     "short_halving": (2, (1,), 0.5),
     "long_nodrop": (10, (10,), 1.0),
     "minirun": (1, (10,), 1.0),
@@ -139,15 +140,15 @@ def split_tensor(tensor_1, tensor_2):
     return result
 
 def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epochs, resume=False, start_epoch=0):
-    print("Start training...")
-
     since = time.time()
     dataloader["train"].dataset.set_num_graphs(cfg.TRAIN.num_graphs_in_matching_instance)
     dataset_size = len(dataloader["train"].dataset)
 
 
     device = next(model.parameters()).device
-    print("{} model on device: {}".format(cfg.MODEL_ARCH , device))
+    if local_rank == 0:
+        print("Start training...")
+        print("{} model on device: {}".format(cfg.MODEL_ARCH , device))
 
     checkpoint_path = Path(cfg.model_dir) / "params"
     if not checkpoint_path.exists():
@@ -193,11 +194,13 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
     )
     
     for epoch in range(start_epoch, num_epochs):
-        print("Epoch {}/{}".format(epoch, num_epochs - 1))
-        print("-" * 10)
+        if local_rank == 0:
+            print("Epoch {}/{}".format(epoch, num_epochs - 1))
+            print("-" * 10)
         model.train()  # Set model to training mode
 
-        print("lr = " + ", ".join(["{:.2e}".format(x["lr"]) for x in optimizer.param_groups]))
+        if local_rank == 0:
+            print("lr = " + ", ".join(["{:.2e}".format(x["lr"]) for x in optimizer.param_groups]))
 
         epoch_loss_2 = 0
         epoch_loss = 0.0
@@ -215,7 +218,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
             data_list = [_.cuda() for _ in inputs["images"]]
             points_gt_list = [_.cuda() for _ in inputs["Ps"]]
             n_points_gt_list = [_.cuda() for _ in inputs["ns"]]
-            edges_list = [_.to("cuda") for _ in inputs["edges"]]
+            edges_list = [_.cuda() for _ in inputs["edges"]]
             perm_mat_list = [perm_mat.cuda() for perm_mat in inputs["gt_perm_mat"]]
             # print("**************************************     training     **************************************")
             # # print(data_list)
@@ -247,17 +250,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                         points_gt_list = swap_src_tgt_order(points_gt_list, i)
                         n_points_gt_list = swap_src_tgt_order(n_points_gt_list, i)
                         edges_list = swap_src_tgt_order(edges_list, i)
-            # print(n_points_gt_list[0])
             n_points_gt_sample = n_points_gt_list[0].to('cpu').apply_(lambda x: torch.randint(low=0, high=x, size=(1,)).item()).to(device)
-            # print("--------------------------------")
-            # print(n_points_gt_sample)
-            # perm_mat_mask = mask_loss(perm_mat_list, n_points_gt_sample) > 0
-            # perm_mat_mask = torch.flatten(perm_mat_mask, 1, 2)
-            # print(perm_mat_mask)
-            # br
-            # num_graphs = points_gt_list[0].size(0)
-            # num_nodes_s = points_gt_list[0].size(1)
-            # num_nodes_t = points_gt_list[1].size(1)
+            
             iter_num = iter_num + 1
 
             # zero the parameter gradients
@@ -266,74 +260,33 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
             with torch.set_grad_enabled(True):
                 # forward
                 
-                s_pred_list = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
-                # if epoch >= 3:
-                #     print(s_pred_list.size(), s_pred_list)
-                #     print("################################################################################################")
-                #     softMax = torch.nn.Softmax(dim=1)
-                #     pred_test = softMax(s_pred_list)
-                #     pred_test = pred_test.view(4, 11, 11)
-                #     print(pred_test.size(), pred_test)
-                #     print("################################################################################################")
-                #     max_indices = torch.argmax(pred_test, dim=2)
-                #     binary_tensor = torch.zeros_like(pred_test)
-                #     binary_tensor.scatter_(2, max_indices.unsqueeze(2), 1.0)
-                #     print(binary_tensor)
-                #     print("################################################################################################")
-                #     print(perm_mat_list[0].size(), perm_mat_list[0])
-                #     print("################################################################################################")
-                #     print(len(perm_mat_list))
-                #     print("################################################################################################")
-                # #     print(perm_mat_list)
-                # print("----------------------------------------------------------------")
-                # print(s_pred_list.size(), s_pred_list)
-                # print("----------------------------------------------------------------")
-                pred_mask = create_pred_mask(s_pred_list.size()[0], n_points_gt_list[0]).to(device)
-                # print(pred_mask.size(), pred_mask)
-                # print("----------------------------------------------------------------")
-                # print("----------------------------------------------------------------")
-                pred_mask = pred_mask.unsqueeze(-1).expand_as(s_pred_list)
-                # print(pred_mask.size(), pred_mask)
-                # print("----------------------------------------------------------------")
-                # print("----------------------------------------------------------------")
-                # print(s_pred_list[pred_mask].size(), s_pred_list[pred_mask])
-                # print("----------------------------------------------------------------")
-                # print("----------------------------------------------------------------")
-                s_pred_list_masked = s_pred_list[pred_mask].view(-1, s_pred_list.size()[-1])
-                # print(s_pred_list_masked.size(), s_pred_list_masked)
-                # print(output_masked.size(), output_masked)
-                # y_gt = torch.flatten(perm_mat_list[0], 1, 2)
-                # print(perm_mat_list[0].size(), perm_mat_list[0])
-                # y_values = torch.argmax(perm_mat_list[0], dim=2)
-                has_one = perm_mat_list[0].sum(dim=2) != 0
-                expanded_mask = has_one.unsqueeze(-1).expand_as(perm_mat_list[0])
-                y_values = perm_mat_list[0].masked_select(expanded_mask).view(-1, perm_mat_list[0].size(2))
-                y_values = torch.argmax(y_values, dim=-1)
-                # y_values = y_values.view(-1)
+                target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
                 
-                # print(perm_mat_list[0].size(), perm_mat_list[0])
-                # y_gt_masked = torch.masked_select(y_gt, perm_mat_mask)
-                # s_pred_masked = torch.masked_select(s_pred_list, perm_mat_mask)
                 
-                # print(s_pred_masked.size(), s_pred_masked)
-                # print("################################################################################################")
-                # print(y_gt_masked.size(), y_gt_masked)
-                # br
-                
-                # print("################################################")
-                # print(s_pred_list_masked.size(), s_pred_list_masked)
-                # y_preds = F.softmax(s_pred_list_masked, dim=-1)
-                # y_preds = torch.argmax(y_preds,dim=-1)
-                # print(y_preds)
-                # print(y_values)
-                # print("################################################")
-                # print(y_values.size(), y_values)
-                loss = criterion(s_pred_list_masked, y_values)
-                # print(loss)
-                # loss /= len(s_pred_list)
-                # print(loss)
-                # epoch_loss_2 += loss.item()
-                # backward + optimize
+                target_similarity = torch.where(perm_mat_list[0] == 0, -torch.ones_like(perm_mat_list[0]), perm_mat_list[0])
+                batch_size = model_output.size()[0]
+                num_points1 = model_output.size()[1]
+                total_loss = 0
+                for b in range(batch_size):
+                    batch_loss = 0
+                    for i in range(num_points1):
+                        # Compute cosine similarity of model_output[b, i] with all points in target_points[b]
+                        cosine_similarities = F.cosine_similarity(model_output[b, i].unsqueeze(0), target_points[b])
+                        
+                        # print(cosine_similarities)
+                        # Apply target for this specific model_output[b, i] row
+                        losses = torch.where(target_similarity[b, i] == 1, 1 - cosine_similarities, torch.clamp(cosine_similarities, min=0))
+                        
+                        # print(losses)
+                        # Accumulate the mean loss for this model_output[b, i] with all points in target_points[b]
+                        batch_loss += losses.mean()
+                        # print(batch_loss)
+                    # Average loss across all points in model_output for the batch and accumulate
+                    total_loss += batch_loss / num_points1
+
+                # Average loss across the entire batch
+                loss = total_loss / batch_size
+                # print(loss.item())
                 loss.backward()
                 if max_norm > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
@@ -479,7 +432,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 #     running_since = time.time()
 
         epoch_loss = epoch_loss / dataset_size
-        print("epoch_loss: ", epoch_loss)
+        if local_rank == 0:
+            print("epoch_loss: ", epoch_loss)
         # epoch_acc = epoch_acc / dataset_size
         # epoch_f1 = epoch_f1 / dataset_size
 
@@ -530,8 +484,11 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
 
 
 if __name__ == "__main__":
-    print('Using config file from: ', os.sys.argv[1])
+    # print('Using config file from: ', os.sys.argv[1])
     cfg = update_params_from_cmdline(default_params=cfg)
+    
+    dist.init_process_group(backend='nccl', init_method='env://')
+    
     import json
     import os
 
@@ -561,10 +518,16 @@ if __name__ == "__main__":
     image_dataset = {
         x: GMDataset(cfg.DATASET_NAME, sets=x, length=dataset_len[x], obj_resize=(256, 256)) for x in ("train", "test")
     }
-    dataloader = {x: get_dataloader(image_dataset[x], fix_seed=(x == "test")) for x in ("train", "test")}
+    
+    sampler = {
+    "train": DistributedSampler(image_dataset["train"]),
+    "test": DistributedSampler(image_dataset["test"])
+    }
+    
+    dataloader = {x: get_dataloader(image_dataset[x],sampler[x], fix_seed=(x == "test")) for x in ("train", "test")}
 
-    torch.cuda.set_device(0)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # torch.cuda.set_device(0)
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if cfg.MODEL_ARCH == 'tf':
         model = Net()
@@ -578,14 +541,18 @@ if __name__ == "__main__":
         model = MatchARNet()
     
     
-    model = model.cuda()
-
+    local_rank = int(os.environ['LOCAL_RANK']) 
+    torch.cuda.set_device(local_rank)
+    device = torch.device(f'cuda:{local_rank}')
+    
+    model = model.to(device)
+    model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
     # criterion = torch.nn.BCEWithLogitsLoss()
-    criterion = torch.nn.CosineEmbeddingLoss()
+    criterion = torch.nn.CrossEntropyLoss()
 
     # print(model)
-    backbone_params = list(model.node_layers.parameters()) + list(model.edge_layers.parameters())
+    backbone_params = list(model.module.node_layers.parameters()) + list(model.module.edge_layers.parameters())
     # backbone_params += list(model.final_layers.parameters())
     
     
@@ -609,6 +576,9 @@ if __name__ == "__main__":
                                    dataloader,
                                    cfg.TRAIN.clip_norm, 
                                    num_epochs=num_epochs,
+                                   local_rank=local_rank,
                                    resume=cfg.warmstart_path is not None, 
                                    start_epoch=0,
                                    )
+    
+    dist.destroy_process_group()
