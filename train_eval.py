@@ -277,28 +277,52 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 batch_size = model_output.size()[0]
                 num_points1 = model_output.size()[1]
                 total_loss = 0
+                total_cosine_similarities = []
                 for b in range(batch_size):
                     batch_loss = 0
+                    batch_cosine_similarities = []
                     for i in range(num_points1):
                         # Compute cosine similarity of model_output[b, i] with all points in target_points[b]
                         cosine_similarities = F.cosine_similarity(model_output[b, i].unsqueeze(0), target_points[b])
-                        
-                        # print(cosine_similarities)
-                        # Apply target for this specific model_output[b, i] row
-                        losses = torch.where(target_similarity[b, i] == 1, 1 - cosine_similarities, torch.clamp(cosine_similarities, min=0))
-                        
-                        # print(losses.shape, losses)
-                        # print(losses)
-                        # Accumulate the mean loss for this model_output[b, i] with all points in target_points[b]
-                        batch_loss += losses.mean()
-                        # print(batch_loss)
-                    # Average loss across all points in model_output for the batch and accumulate
-                    total_loss += batch_loss / num_points1
+                        batch_cosine_similarities.append(cosine_similarities)
+                    total_cosine_similarities.append(torch.stack(batch_cosine_similarities))
+                # print(torch.stack(total_cosine_similarities).shape, torch.stack(total_cosine_similarities))
+                total_cosine_similarities = torch.stack(total_cosine_similarities).to(model_output.device)
+                # print(total_cosine_similarities.shape)
+                total_probabs = F.sigmoid(total_cosine_similarities)
+                
+                
+                loss = criterion(total_probabs, perm_mat_list[0])
+                
+                loss /= len(model_output)
 
-                # Average loss across the entire batch
-                loss = total_loss / batch_size
-                # print(loss.item())
+                # backward + optimize
                 loss.backward()
+                #print(total_probabs)
+                # print(perm_mat_list[0])
+                # for b in range(batch_size):
+                #     batch_loss = 0
+                #     for i in range(num_points1):
+                #         # Compute cosine similarity of model_output[b, i] with all points in target_points[b]
+                #         cosine_similarities = F.cosine_similarity(model_output[b, i].unsqueeze(0), target_points[b])
+                #         print(cosine_similarities)
+                #         br
+                #         # print(cosine_similarities)
+                #         # Apply target for this specific model_output[b, i] row
+                #         losses = torch.where(target_similarity[b, i] == 1, 1 - cosine_similarities, torch.clamp(cosine_similarities, min=0))
+                        
+                #         # print(losses.shape, losses)
+                #         # print(losses)
+                #         # Accumulate the mean loss for this model_output[b, i] with all points in target_points[b]
+                #         batch_loss += losses.mean()
+                #         # print(batch_loss)
+                #     # Average loss across all points in model_output for the batch and accumulate
+                #     total_loss += batch_loss / num_points1
+
+                # # Average loss across the entire batch
+                # loss = total_loss / batch_size
+                # # print(loss.item())
+                # loss.backward()
                 if max_norm > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
                 optimizer.step()
@@ -577,7 +601,8 @@ if __name__ == "__main__":
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
     # criterion = torch.nn.BCEWithLogitsLoss()
-    criterion = torch.nn.CrossEntropyLoss()
+    # criterion = torch.nn.CrossEntropyLoss()
+    criterion = torch.nn.BCELoss()
 
     # print(model)
     backbone_params = list(model.module.node_layers.parameters()) + list(model.module.edge_layers.parameters())

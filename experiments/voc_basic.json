@@ -1,5 +1,5 @@
 {
-  "BATCH_SIZE": 4,
+  "BATCH_SIZE": 2,
   "DATASET_NAME": "PascalVOC",
   "exclude_willow_classes": false,
   "EVAL": {
