@@ -24,6 +24,14 @@ from utils.config import cfg
 from utils.utils import update_params_from_cmdline, compute_grad_norm
 
 
+
+def calculate_correct_and_valid(prediction_tensor, y_values_matching):
+    valid_mask = (prediction_tensor != -1) & (y_values_matching != -1)
+    batch_correct = (prediction_tensor[valid_mask] == y_values_matching[valid_mask]).sum().item()
+    batch_total_valid = valid_mask.sum().item()
+    return batch_correct, batch_total_valid
+
+
 class HammingLoss(torch.nn.Module):
     def forward(self, suggested, target):
         errors = suggested * (1.0 - target) + (1.0 - suggested) * target
@@ -214,6 +222,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
 
         # print(len(dataloader["train"]))
         # Iterate over data.
+        epoch_correct = 0
+        epoch_total_valid = 0
         for inputs in dataloader["train"]:
             data_list = [_.cuda() for _ in inputs["images"]]
             points_gt_list = [_.cuda() for _ in inputs["Ps"]]
@@ -277,6 +287,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                         # Apply target for this specific model_output[b, i] row
                         losses = torch.where(target_similarity[b, i] == 1, 1 - cosine_similarities, torch.clamp(cosine_similarities, min=0))
                         
+                        # print(losses.shape, losses)
                         # print(losses)
                         # Accumulate the mean loss for this model_output[b, i] with all points in target_points[b]
                         batch_loss += losses.mean()
@@ -292,38 +303,47 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
                 optimizer.step()
 
-                # with torch.no_grad():
-                #     matchings = []
-                #     B, N_s, N_t = perm_mat_list[0].size()
-                #     # print(perm_mat_list[0].size(), perm_mat_list[0])
-                #     n_points_sample = torch.zeros(B, dtype=torch.int).to(device)
-                #     # perm_mat_dec_list = [torch.zeros(B, N_s, N_t, dtype=torch.int).to(device)]
-                #     # cost_mask = torch.ones(B, N_s, N_t, dtype=torch.int).to(device)
-                #     # batch_idx = torch.arange(cfg.BATCH_SIZE)
+                with torch.no_grad():
+                    matchings = []
+                    B, N_s, N_t = perm_mat_list[0].size()
+                    # print(perm_mat_list[0].size(), perm_mat_list[0])
+                    n_points_sample = torch.zeros(B, dtype=torch.int).to(device)
+                    # perm_mat_dec_list = [torch.zeros(B, N_s, N_t, dtype=torch.int).to(device)]
+                    # cost_mask = torch.ones(B, N_s, N_t, dtype=torch.int).to(device)
+                    # batch_idx = torch.arange(cfg.BATCH_SIZE)
 
-                #     # set matching score for padded to zero
-                #     # for batch in batch_idx:
-                #     #     n_point = n_points_gt_list[0][batch]
-                #     #     cost_mask[batch, n_point:, :] = -1
-                #     #     cost_mask[batch, :, n_point:] = -1 # ?
-                #     eval_pred_points = []
-                #     for i in range(B):
-                #         a = []
-                #         eval_pred_points.append(a)
-                #     j_pred = 0
-                #     for np in range(N_t):
-                #         # print("EVAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-                #         s_pred_list = model(
-                #             data_list,
-                #             points_gt_list,
-                #             edges_list,
-                #             n_points_gt_list,
-                #             n_points_sample,
-                #             perm_mat_list,
-                #             eval_pred_points,
-                #             in_training= False
-                #         )
+                    # set matching score for padded to zero
+                    # for batch in batch_idx:
+                    #     n_point = n_points_gt_list[0][batch]
+                    #     cost_mask[batch, n_point:, :] = -1
+                    #     cost_mask[batch, :, n_point:] = -1 # ?
+                    eval_pred_points = 0
+                    j_pred = 0
+                    predictions_list = []
+                    for i in range(B):
+                        predictions_list.append([])
+                    for np in range(N_t):
                         
+                #         # print("EVAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+                        target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_sample, perm_mat_list, eval_pred_points, in_training= False)
+                        batch_size = model_output.size()[0]
+                        num_points1 = model_output.size()[1]
+                        current_data_point = model_output[:,eval_pred_points,:]
+                        for b in range(batch_size):
+                            cosine_similarities = F.cosine_similarity(model_output[b, eval_pred_points].unsqueeze(0), target_points[b])
+                            cosine_matchings = torch.argmax(cosine_similarities, dim=-1)
+                            if eval_pred_points < n_points_gt_list[0][b]:
+                                predictions_list[b].append(cosine_matchings.item())
+                            else:
+                                predictions_list[b].append(-1)
+                        
+                        eval_pred_points +=1
+                    prediction_tensor = torch.tensor(predictions_list).to(perm_mat_list[0].device)
+                    y_values_matching = torch.argmax(perm_mat_list[0], dim=-1)
+                    batch_correct, batch_total_valid = calculate_correct_and_valid(prediction_tensor, y_values_matching)
+                    
+                    epoch_correct += batch_correct
+                    epoch_total_valid += batch_total_valid
                 #         pred_mask = create_pred_mask(s_pred_list.size()[0], n_points_gt_list[0]).to(device)
                 #         # print("EVAAAAAAAL!")
                 #         # print(s_pred_list.size(), s_pred_list)
@@ -430,10 +450,14 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 #     running_f1 = 0.0
                 #     running_loss = 0.0
                 #     running_since = time.time()
-
+        if epoch_total_valid > 0:
+            epoch_acc = epoch_correct / epoch_total_valid
+        else:
+            epoch_acc = 0.0
+        
         epoch_loss = epoch_loss / dataset_size
         if local_rank == 0:
-            print("epoch_loss: ", epoch_loss)
+            print(f'epoch loss: {epoch_loss}, epoch accuracy: {epoch_acc}')
         # epoch_acc = epoch_acc / dataset_size
         # epoch_f1 = epoch_f1 / dataset_size
 
@@ -487,7 +511,11 @@ if __name__ == "__main__":
     # print('Using config file from: ', os.sys.argv[1])
     cfg = update_params_from_cmdline(default_params=cfg)
     
-    dist.init_process_group(backend='nccl', init_method='env://')
+    #windows
+    dist.init_process_group(backend='gloo', init_method='env://')
+    
+    #linux
+    # dist.init_process_group(backend='nccl', init_method='env://')
     
     import json
     import os

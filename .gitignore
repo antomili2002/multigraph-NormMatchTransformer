@@ -6,3 +6,4 @@ __pycache__
 /.vscode
 screenlog*
 *.csv
+run_script.csv

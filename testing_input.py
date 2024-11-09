@@ -62,38 +62,48 @@ import numpy as np
 # output.backward()
 torch.manual_seed(1)
 
-batch_size = 4
-num_points1 = 2  # number of points in input1 per batch
-num_points2 = 3  # number of points in input2 per batch
+batch_size = 1
+num_points1 = 1  # number of points in input1 per batch
+num_points2 = 2  # number of points in input2 per batch
 feature_dim = 5
 
-input1 = torch.randn(batch_size, num_points1, feature_dim, requires_grad=True)
-input2 = torch.randn(batch_size, num_points2, feature_dim, requires_grad=True)
+input1 = torch.randn(num_points1, feature_dim, requires_grad=True)
+input2 = torch.randn(num_points2, feature_dim, requires_grad=True)
 target = torch.tensor([[[1, -1, -1], [-1, 1, -1]]] * batch_size)
 
+print(input1)
+print(input2)
+co_sim = F.cosine_similarity(input1, input2)
+print(co_sim)
+
+print(input2[0].unsqueeze(0))
+co1 = F.cosine_similarity(input1[0].unsqueeze(0), input2[0].unsqueeze(0))
+print(co1)
+co2 = F.cosine_similarity(input1[0].unsqueeze(0), input2[1].unsqueeze(0))
+print(co2)
 # Initialize total loss
-total_loss = 0
+# total_loss = 0
 
 
-for b in range(batch_size):
-    batch_loss = 0
-    for i in range(num_points1):
-        # Compute cosine similarity of input1[b, i] with all points in input2[b]
-        cosine_similarities = F.cosine_similarity(input1[b, i].unsqueeze(0), input2[b])
+# for b in range(batch_size):
+#     batch_loss = 0
+#     for i in range(num_points1):
+#         # Compute cosine similarity of input1[b, i] with all points in input2[b]
+#         cosine_similarities = F.cosine_similarity(input1[b, i].unsqueeze(0), input2[b])
         
-        # Apply target for this specific input1[b, i] row
-        losses = torch.where(target[b, i] == 1, 1 - cosine_similarities, torch.clamp(cosine_similarities, min=0))
+#         # Apply target for this specific input1[b, i] row
+#         losses = torch.where(target[b, i] == 1, 1 - cosine_similarities, torch.clamp(cosine_similarities, min=0))
         
-        # Accumulate the mean loss for this input1[b, i] with all points in input2[b]
-        batch_loss += losses.mean()
+#         # Accumulate the mean loss for this input1[b, i] with all points in input2[b]
+#         batch_loss += losses.mean()
         
-    # Average loss across all points in input1 for the batch and accumulate
-    total_loss += batch_loss / num_points1
+#     # Average loss across all points in input1 for the batch and accumulate
+#     total_loss += batch_loss / num_points1
 
-# Average loss across the entire batch
-final_loss = total_loss / batch_size
-final_loss.backward()
-print("Custom Cosine Embedding Loss with batch dimension:", final_loss.item())
+# # Average loss across the entire batch
+# final_loss = total_loss / batch_size
+# final_loss.backward()
+# print("Custom Cosine Embedding Loss with batch dimension:", final_loss.item())
 
 # Backward pass
 
@@ -132,7 +142,5 @@ print("Custom Cosine Embedding Loss with batch dimension:", final_loss.item())
 # print(p1)
 # print(p2)
 # print((p1+p2)/2)
-
-print()
 
 # print((1 - torch.triu(torch.ones((1, 5, 10)), diagonal=1)).bool())
