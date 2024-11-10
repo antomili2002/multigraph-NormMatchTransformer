@@ -111,8 +111,8 @@ class MatchARNet(utils.backbone.VGG16_bn):
         self.tf_decoder = nn.TransformerDecoder(self.tf_decoder_layer, num_layers=cfg.Matching_TF.n_decoder)
         
         
-        self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024, 512, 256], 128, batch_norm=True)
-        self.mlp_out_2 = MLP([cfg.Matching_TF.d_model, 512, 1024, 512, 256], 128, batch_norm=True)
+        self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024, 512, 256], 512, batch_norm=True)
+        self.mlp_out_2 = MLP([cfg.Matching_TF.d_model, 512, 1024, 512, 256], 512, batch_norm=True)
         self.global_state_dim = 1024
 
         # matched encoding
@@ -226,15 +226,15 @@ class MatchARNet(utils.backbone.VGG16_bn):
         # print(query_mask.size(), query_mask)
         
         S_mask = ~torch.cat((s_mask, t_mask), dim=1)
-        input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
+        input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)#torch.cat((h_s, h_t), dim=1)
         encoder_output = self.tf_encoder(src=input, src_key_padding_mask=S_mask)
         
         
         sample_size_each = encoder_output.size()[1] // 2 #Get the amount of concatenated points
         
         #split context sensitiv output from encoder into source and target patches
-        source_points = encoder_output[:, :sample_size_each, :].to('cuda')
-        target_points = encoder_output[:, sample_size_each:, :].to('cuda')
+        source_points = encoder_output[:, :sample_size_each, :].to(encoder_output.device)
+        target_points = encoder_output[:, sample_size_each:, :].to(encoder_output.device)
         
         batch_size, seq_len, _ = source_points.size()
         source_points_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1).to(source_points.device)#(1 - torch.triu(torch.ones((batch_size, sample_size_each, sample_size_each)), diagonal=1)).bool()
@@ -245,13 +245,13 @@ class MatchARNet(utils.backbone.VGG16_bn):
         if eval_pred_points is not None:
             source_points[:,eval_pred_points+1:,:] = 0
         decoder_output = self.tf_decoder(tgt= source_points,
-                                          memory= target_points,
+                                          memory= encoder_output,
                                           tgt_mask=source_points_mask) # TODO: tgt_key_padding_mask=query_mask ?
         
         #TODO: test if with MLP and batchnorm or not / leave out mlp
         # print(decoder_output)
-        # decoder_output = self.mlp_out(decoder_output)
-        # target_points = self.mlp_out_2(target_points)
+        decoder_output = self.mlp_out(decoder_output)
+        target_points = self.mlp_out_2(target_points)
     
         return target_points, decoder_output
         

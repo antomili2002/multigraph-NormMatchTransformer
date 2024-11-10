@@ -41,7 +41,7 @@ class HammingLoss(torch.nn.Module):
 lr_schedules = {
     #TODO: CHANGE BACK TO 10
     # "long_halving": (30, (2, 4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
-    "long_halving": (32, (11, 17, 23, 29), 0.1),
+    "long_halving": (50, (40,), 0.1),
     "short_halving": (2, (1,), 0.5),
     "long_nodrop": (10, (10,), 1.0),
     "minirun": (1, (10,), 1.0),
@@ -105,8 +105,6 @@ def sample_errors(perm_mats, pred_mats, threshold=0.2):
         if error > threshold:
             error_samples.append(i)
     return error_samples
-
-import torch
 
 def create_pred_mask(batch_size, n_points_list, target_length=40):
     """
@@ -278,51 +276,53 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 num_points1 = model_output.size()[1]
                 total_loss = 0
                 total_cosine_similarities = []
-                for b in range(batch_size):
-                    batch_loss = 0
-                    batch_cosine_similarities = []
-                    for i in range(num_points1):
-                        # Compute cosine similarity of model_output[b, i] with all points in target_points[b]
-                        cosine_similarities = F.cosine_similarity(model_output[b, i].unsqueeze(0), target_points[b])
-                        batch_cosine_similarities.append(cosine_similarities)
-                    total_cosine_similarities.append(torch.stack(batch_cosine_similarities))
-                # print(torch.stack(total_cosine_similarities).shape, torch.stack(total_cosine_similarities))
-                total_cosine_similarities = torch.stack(total_cosine_similarities).to(model_output.device)
-                # print(total_cosine_similarities.shape)
-                total_probabs = F.sigmoid(total_cosine_similarities)
-                
-                
-                loss = criterion(total_probabs, perm_mat_list[0])
-                
-                loss /= len(model_output)
-
-                # backward + optimize
-                loss.backward()
-                #print(total_probabs)
-                # print(perm_mat_list[0])
                 # for b in range(batch_size):
                 #     batch_loss = 0
+                #     batch_cosine_similarities = []
                 #     for i in range(num_points1):
                 #         # Compute cosine similarity of model_output[b, i] with all points in target_points[b]
                 #         cosine_similarities = F.cosine_similarity(model_output[b, i].unsqueeze(0), target_points[b])
-                #         print(cosine_similarities)
-                #         br
-                #         # print(cosine_similarities)
-                #         # Apply target for this specific model_output[b, i] row
-                #         losses = torch.where(target_similarity[b, i] == 1, 1 - cosine_similarities, torch.clamp(cosine_similarities, min=0))
-                        
-                #         # print(losses.shape, losses)
-                #         # print(losses)
-                #         # Accumulate the mean loss for this model_output[b, i] with all points in target_points[b]
-                #         batch_loss += losses.mean()
-                #         # print(batch_loss)
-                #     # Average loss across all points in model_output for the batch and accumulate
-                #     total_loss += batch_loss / num_points1
+                #         cosine_similarities += 0.5
+                #         # if local_rank == 0:
+                #         #     if i == 0:
+                #         #         if b == 0:
+                #         #             print(cosine_similarities)
+                #         batch_cosine_similarities.append(cosine_similarities)
+                #     total_cosine_similarities.append(torch.stack(batch_cosine_similarities))
+                # # print(torch.stack(total_cosine_similarities).shape, torch.stack(total_cosine_similarities))
+                # total_cosine_similarities = torch.stack(total_cosine_similarities).to(model_output.device)
+                # # print(total_cosine_similarities.shape)
+                # total_probabs = F.sigmoid(total_cosine_similarities)
+                
+                # loss = criterion(total_probabs, perm_mat_list[0])
+                
+                # # loss /= len(model_output)
 
-                # # Average loss across the entire batch
-                # loss = total_loss / batch_size
-                # # print(loss.item())
+                # # backward + optimize
                 # loss.backward()
+                #print(total_probabs)
+                # print(perm_mat_list[0])
+                for b in range(batch_size):
+                    batch_loss = 0
+                    for i in range(num_points1):
+                        # Compute cosine similarity of model_output[b, i] with all points in target_points[b]
+                        cosine_similarities = F.cosine_similarity(model_output[b, i].unsqueeze(0), target_points[b])
+                        # print(cosine_similarities)
+                        # Apply target for this specific model_output[b, i] row
+                        losses = torch.where(target_similarity[b, i] == 1, 1 - cosine_similarities, torch.clamp(cosine_similarities, min=0))
+                        
+                        # print(losses.shape, losses)
+                        # print(losses)
+                        # Accumulate the mean loss for this model_output[b, i] with all points in target_points[b]
+                        batch_loss += losses.mean()
+                        # print(batch_loss)
+                    # Average loss across all points in model_output for the batch and accumulate
+                    total_loss += batch_loss / num_points1
+
+                # Average loss across the entire batch
+                loss = total_loss #/ batch_size
+                # print(loss.item())
+                loss.backward()
                 if max_norm > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
                 optimizer.step()
@@ -536,10 +536,10 @@ if __name__ == "__main__":
     cfg = update_params_from_cmdline(default_params=cfg)
     
     #windows
-    dist.init_process_group(backend='gloo', init_method='env://')
+    # dist.init_process_group(backend='gloo', init_method='env://')
     
     #linux
-    # dist.init_process_group(backend='nccl', init_method='env://')
+    dist.init_process_group(backend='nccl', init_method='env://')
     
     import json
     import os

@@ -27,10 +27,10 @@
   "RANDOM_SEED": 123,
   "warmstart_path": null,
   "TRAIN": {
-    "EPOCH_ITERS": 50,
-    "LR": 0.00001,
+    "EPOCH_ITERS": 100,
+    "LR": 0.0001,
     "lr_schedule": "long_halving",
-    "clip_norm": 3,
+    "clip_norm": 0,
     "num_graphs_in_matching_instance": 2,
     "random_swap": false,
     "AR": true
