@@ -222,6 +222,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         # Iterate over data.
         epoch_correct = 0
         epoch_total_valid = 0
+        modeL_parameter_list = list(model.parameters())
+        # print(modeL_parameter_list[-1:])
         for inputs in dataloader["train"]:
             data_list = [_.cuda() for _ in inputs["images"]]
             points_gt_list = [_.cuda() for _ in inputs["Ps"]]
@@ -276,98 +278,104 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 num_points1 = model_output.size()[1]
                 total_loss = 0
                 total_cosine_similarities = []
-                # for b in range(batch_size):
-                #     batch_loss = 0
-                #     batch_cosine_similarities = []
-                #     for i in range(num_points1):
-                #         # Compute cosine similarity of model_output[b, i] with all points in target_points[b]
-                #         cosine_similarities = F.cosine_similarity(model_output[b, i].unsqueeze(0), target_points[b])
-                #         cosine_similarities += 0.5
-                #         # if local_rank == 0:
-                #         #     if i == 0:
-                #         #         if b == 0:
-                #         #             print(cosine_similarities)
-                #         batch_cosine_similarities.append(cosine_similarities)
-                #     total_cosine_similarities.append(torch.stack(batch_cosine_similarities))
-                # # print(torch.stack(total_cosine_similarities).shape, torch.stack(total_cosine_similarities))
-                # total_cosine_similarities = torch.stack(total_cosine_similarities).to(model_output.device)
-                # # print(total_cosine_similarities.shape)
-                # total_probabs = F.sigmoid(total_cosine_similarities)
-                
-                # loss = criterion(total_probabs, perm_mat_list[0])
-                
-                # # loss /= len(model_output)
-
-                # # backward + optimize
-                # loss.backward()
-                #print(total_probabs)
-                # print(perm_mat_list[0])
+                #****************************************************************
                 for b in range(batch_size):
                     batch_loss = 0
+                    batch_cosine_similarities = []
                     for i in range(num_points1):
                         # Compute cosine similarity of model_output[b, i] with all points in target_points[b]
                         cosine_similarities = F.cosine_similarity(model_output[b, i].unsqueeze(0), target_points[b])
-                        # print(cosine_similarities)
-                        # Apply target for this specific model_output[b, i] row
-                        losses = torch.where(target_similarity[b, i] == 1, 1 - cosine_similarities, torch.clamp(cosine_similarities, min=0))
-                        
-                        # print(losses.shape, losses)
-                        # print(losses)
-                        # Accumulate the mean loss for this model_output[b, i] with all points in target_points[b]
-                        batch_loss += losses.mean()
-                        # print(batch_loss)
-                    # Average loss across all points in model_output for the batch and accumulate
-                    total_loss += batch_loss / num_points1
+                        batch_cosine_similarities.append(cosine_similarities)
+                    total_cosine_similarities.append(torch.stack(batch_cosine_similarities))
+                # print(torch.stack(total_cosine_similarities).shape, torch.stack(total_cosine_similarities))
+                total_cosine_similarities = torch.stack(total_cosine_similarities).to(model_output.device)
+                print(total_cosine_similarities.shape, total_cosine_similarities)
+                similarity_scores = torch.atanh(total_cosine_similarities)
+                print(similarity_scores.shape, similarity_scores)
+                br
+                # print(total_cosine_similarities.shape)
+                total_probabs = F.sigmoid(total_cosine_similarities)
+                
+                loss = criterion(total_probabs, perm_mat_list[0])
+                
+                # loss /= len(model_output)
 
-                # Average loss across the entire batch
-                loss = total_loss #/ batch_size
-                # print(loss.item())
+                # backward + optimize
                 loss.backward()
+                #****************************************************************
+                #print(total_probabs)
+                # print(perm_mat_list[0])
+                ################################################################	
+                # for b in range(batch_size):
+                #     batch_loss = 0
+                #     for i in range(num_points1):
+                #         # Compute cosine similarity of model_output[b, i] with all points in target_points[b]
+                #         cosine_similarities = F.cosine_similarity(model_output[b, i].unsqueeze(0), target_points[b])
+                #         # print(cosine_similarities)
+                #         # Apply target for this specific model_output[b, i] row
+                #         losses = torch.where(target_similarity[b, i] == 1, 1 - cosine_similarities, torch.clamp(cosine_similarities, min=0))
+                        
+                #         # print(losses.shape, losses)
+                #         # print(losses)
+                #         # Accumulate the mean loss for this model_output[b, i] with all points in target_points[b]
+                #         batch_loss += losses.mean()
+                #         # print(batch_loss)
+                #     # Average loss across all points in model_output for the batch and accumulate
+                #     total_loss += batch_loss / num_points1
+
+                # # Average loss across the entire batch
+                # loss = total_loss #/ batch_size
+                # # print(loss.item())
+                # loss.backward()
+                ################################################################	
                 if max_norm > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
                 optimizer.step()
 
-                with torch.no_grad():
-                    matchings = []
-                    B, N_s, N_t = perm_mat_list[0].size()
-                    # print(perm_mat_list[0].size(), perm_mat_list[0])
-                    n_points_sample = torch.zeros(B, dtype=torch.int).to(device)
-                    # perm_mat_dec_list = [torch.zeros(B, N_s, N_t, dtype=torch.int).to(device)]
-                    # cost_mask = torch.ones(B, N_s, N_t, dtype=torch.int).to(device)
-                    # batch_idx = torch.arange(cfg.BATCH_SIZE)
+            with torch.no_grad():
+                matchings = []
+                B, N_s, N_t = perm_mat_list[0].size()
+                # print(perm_mat_list[0].size(), perm_mat_list[0])
+                n_points_sample = torch.zeros(B, dtype=torch.int).to(device)
+                # perm_mat_dec_list = [torch.zeros(B, N_s, N_t, dtype=torch.int).to(device)]
+                # cost_mask = torch.ones(B, N_s, N_t, dtype=torch.int).to(device)
+                # batch_idx = torch.arange(cfg.BATCH_SIZE)
 
-                    # set matching score for padded to zero
-                    # for batch in batch_idx:
-                    #     n_point = n_points_gt_list[0][batch]
-                    #     cost_mask[batch, n_point:, :] = -1
-                    #     cost_mask[batch, :, n_point:] = -1 # ?
-                    eval_pred_points = 0
-                    j_pred = 0
-                    predictions_list = []
-                    for i in range(B):
-                        predictions_list.append([])
-                    for np in range(N_t):
-                        
-                #         # print("EVAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-                        target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_sample, perm_mat_list, eval_pred_points, in_training= False)
-                        batch_size = model_output.size()[0]
-                        num_points1 = model_output.size()[1]
-                        current_data_point = model_output[:,eval_pred_points,:]
-                        for b in range(batch_size):
-                            cosine_similarities = F.cosine_similarity(model_output[b, eval_pred_points].unsqueeze(0), target_points[b])
-                            cosine_matchings = torch.argmax(cosine_similarities, dim=-1)
-                            if eval_pred_points < n_points_gt_list[0][b]:
-                                predictions_list[b].append(cosine_matchings.item())
-                            else:
-                                predictions_list[b].append(-1)
-                        
-                        eval_pred_points +=1
-                    prediction_tensor = torch.tensor(predictions_list).to(perm_mat_list[0].device)
-                    y_values_matching = torch.argmax(perm_mat_list[0], dim=-1)
-                    batch_correct, batch_total_valid = calculate_correct_and_valid(prediction_tensor, y_values_matching)
+                # set matching score for padded to zero
+                # for batch in batch_idx:
+                #     n_point = n_points_gt_list[0][batch]
+                #     cost_mask[batch, n_point:, :] = -1
+                #     cost_mask[batch, :, n_point:] = -1 # ?
+                eval_pred_points = 0
+                j_pred = 0
+                predictions_list = []
+                for i in range(B):
+                    predictions_list.append([])
+                for np in range(N_t):
                     
-                    epoch_correct += batch_correct
-                    epoch_total_valid += batch_total_valid
+            #         # print("EVAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+                    target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_sample, perm_mat_list, eval_pred_points, in_training= False)
+                    batch_size = model_output.size()[0]
+                    num_points1 = model_output.size()[1]
+                    current_data_point = model_output[:,eval_pred_points,:]
+                    for b in range(batch_size):
+                        cosine_similarities = F.cosine_similarity(model_output[b, eval_pred_points].unsqueeze(0), target_points[b])
+                        cosine_matchings = torch.argmax(cosine_similarities, dim=-1)
+                        if eval_pred_points < n_points_gt_list[0][b]:
+                            predictions_list[b].append(cosine_matchings.item())
+                        else:
+                            predictions_list[b].append(-1)
+                    
+                    eval_pred_points +=1
+                prediction_tensor = torch.tensor(predictions_list).to(perm_mat_list[0].device)
+                y_values_matching = torch.argmax(perm_mat_list[0], dim=-1)
+                batch_correct, batch_total_valid = calculate_correct_and_valid(prediction_tensor, y_values_matching)
+                # print(prediction_tensor)
+                # print(y_values_matching)
+                # print("------------------")
+                # print(batch_correct, batch_total_valid)
+                epoch_correct += batch_correct
+                epoch_total_valid += batch_total_valid
                 #         pred_mask = create_pred_mask(s_pred_list.size()[0], n_points_gt_list[0]).to(device)
                 #         # print("EVAAAAAAAL!")
                 #         # print(s_pred_list.size(), s_pred_list)
@@ -425,9 +433,9 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 # f1 = f1_score(_tp, _fp, _fn)
 
                 # # statistics
-                bs = perm_mat_list[0].size(0)
-                # running_loss += loss.item() * bs  # multiply with batch size
-                epoch_loss += loss.item() * bs
+            bs = perm_mat_list[0].size(0)
+            # running_loss += loss.item() * bs  # multiply with batch size
+            epoch_loss += loss.item() #* bs
                 # running_acc += acc.item() * bs
                 # epoch_acc += acc.item() * bs
                 # running_f1 += f1.item() * bs
@@ -536,10 +544,10 @@ if __name__ == "__main__":
     cfg = update_params_from_cmdline(default_params=cfg)
     
     #windows
-    # dist.init_process_group(backend='gloo', init_method='env://')
+    dist.init_process_group(backend='gloo', init_method='env://')
     
     #linux
-    dist.init_process_group(backend='nccl', init_method='env://')
+    # dist.init_process_group(backend='nccl', init_method='env://')
     
     import json
     import os
@@ -614,10 +622,11 @@ if __name__ == "__main__":
 
     new_params = [param for param in model.parameters() if id(param) not in backbone_ids]
     opt_params = [
-        dict(params=backbone_params, lr=cfg.TRAIN.LR * 0.01),
+        dict(params=backbone_params, lr=cfg.TRAIN.LR * 0.1),
         dict(params=new_params, lr=cfg.TRAIN.LR),
     ]
-    optimizer = optim.RAdam(opt_params)
+    optimizer = optim.RAdam(opt_params, weight_decay=1e-5)
+    # optimizer = optim.Adam(opt_params, weight_decay=1e-3)
 
     if not Path(cfg.model_dir).exists():
         Path(cfg.model_dir).mkdir(parents=True)

@@ -111,14 +111,14 @@ class MatchARNet(utils.backbone.VGG16_bn):
         self.tf_decoder = nn.TransformerDecoder(self.tf_decoder_layer, num_layers=cfg.Matching_TF.n_decoder)
         
         
-        self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024, 512, 256], 512, batch_norm=True)
-        self.mlp_out_2 = MLP([cfg.Matching_TF.d_model, 512, 1024, 512, 256], 512, batch_norm=True)
+        # self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024, 512, 256], 512, batch_norm=True)
+        # self.mlp_out_2 = MLP([cfg.Matching_TF.d_model, 512, 1024, 512, 256], 512, batch_norm=True)
         self.global_state_dim = 1024
 
         # matched encoding
-        self.matched_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
+        # self.matched_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
         # mask_match encoding
-        self.mask_match_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
+        # self.mask_match_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
     
     
     def update_queries(self, Q, in_training, eval_pred_points, n_points, all_targets):
@@ -226,7 +226,8 @@ class MatchARNet(utils.backbone.VGG16_bn):
         # print(query_mask.size(), query_mask)
         
         S_mask = ~torch.cat((s_mask, t_mask), dim=1)
-        input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)#torch.cat((h_s, h_t), dim=1)
+        # input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
+        input = torch.cat((h_s, h_t), dim=1)
         encoder_output = self.tf_encoder(src=input, src_key_padding_mask=S_mask)
         
         
@@ -245,13 +246,13 @@ class MatchARNet(utils.backbone.VGG16_bn):
         if eval_pred_points is not None:
             source_points[:,eval_pred_points+1:,:] = 0
         decoder_output = self.tf_decoder(tgt= source_points,
-                                          memory= encoder_output,
+                                          memory= target_points,
                                           tgt_mask=source_points_mask) # TODO: tgt_key_padding_mask=query_mask ?
         
         #TODO: test if with MLP and batchnorm or not / leave out mlp
         # print(decoder_output)
-        decoder_output = self.mlp_out(decoder_output)
-        target_points = self.mlp_out_2(target_points)
+        # decoder_output = self.mlp_out(decoder_output)
+        # target_points = self.mlp_out_2(target_points)
     
         return target_points, decoder_output
         
