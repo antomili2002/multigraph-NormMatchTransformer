@@ -1,5 +1,5 @@
 {
-  "BATCH_SIZE": 2,
+  "BATCH_SIZE": 4,
   "DATASET_NAME": "PascalVOC",
   "exclude_willow_classes": false,
   "EVAL": {
@@ -28,9 +28,9 @@
   "warmstart_path": null,
   "TRAIN": {
     "EPOCH_ITERS": 25,
-    "LR": 0.000001,
+    "LR": 0.0002,
     "lr_schedule": "long_halving",
-    "clip_norm": 5,
+    "clip_norm": 0.5,
     "num_graphs_in_matching_instance": 2,
     "random_swap": false,
     "AR": true

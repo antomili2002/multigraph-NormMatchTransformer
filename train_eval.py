@@ -6,6 +6,8 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+
+
 from torch.utils.data import DataLoader, Subset, DistributedSampler
 from sklearn.model_selection import train_test_split
 import numpy as np
@@ -15,6 +17,7 @@ from pathlib import Path
 import os
 import pandas as pd
 import matplotlib
+
 
 from data.data_loader_multigraph import GMDataset, get_dataloader
 from utils.evaluation_metric import matching_accuracy_from_lists, f1_score, get_pos_neg_from_lists, make_perm_mat_pred, make_sampled_perm_mat_pred
@@ -40,8 +43,8 @@ class HammingLoss(torch.nn.Module):
 
 lr_schedules = {
     #TODO: CHANGE BACK TO 10
-    # "long_halving": (30, (2, 4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
-    "long_halving": (50, (40,), 0.1),
+    "long_halving": (30, (3, 6, 12, 26), 0.25),
+    # "long_halving": (50, (40,), 0.1),
     "short_halving": (2, (1,), 0.5),
     "long_nodrop": (10, (10,), 1.0),
     "minirun": (1, (10,), 1.0),
@@ -134,6 +137,25 @@ def create_pred_mask(batch_size, n_points_list, target_length=40):
 
     return mask
 
+def calculate_f1_score(prediction_tensor, y_values_matching):
+    # Mask to filter out invalid predictions/labels
+    valid_mask = (prediction_tensor != -1) & (y_values_matching != -1)
+    valid_preds = prediction_tensor[valid_mask]
+    valid_labels = y_values_matching[valid_mask]
+
+    # Calculate TP, FP, and FN
+    tp = ((valid_preds == valid_labels) & (valid_preds != -1)).sum().item()
+    fp = ((valid_preds != valid_labels) & (valid_preds != -1)).sum().item()
+    fn = ((valid_labels != valid_preds) & (valid_labels != -1)).sum().item()
+
+    # Compute Precision, Recall, and F1 Score
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+
+    return f1_score
+
+
 def split_tensor(tensor_1, tensor_2):
     result = []
     start_index = 0
@@ -210,6 +232,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
 
         epoch_loss_2 = 0
         epoch_loss = 0.0
+        epoch_f1_score = 0
         running_loss = 0.0
         running_acc = 0.0
         epoch_acc = 0.0
@@ -222,6 +245,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         # Iterate over data.
         epoch_correct = 0
         epoch_total_valid = 0
+        epoch_f1_score = 0
         modeL_parameter_list = list(model.parameters())
         # print(modeL_parameter_list[-1:])
         for inputs in dataloader["train"]:
@@ -237,8 +261,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
             # print(points_gt_list)
             # print("----------------------------------------------------------------")
             # print(n_points_gt_list)
-            # br
             # print("----------------------------------------------------------------")
+            # br
             # print(edges_list)
             # br
             # print("----------------------------------------------------------------")
@@ -273,7 +297,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
                 
                 
-                target_similarity = torch.where(perm_mat_list[0] == 0, -torch.ones_like(perm_mat_list[0]), perm_mat_list[0])
+                # target_similarity = torch.where(perm_mat_list[0] == 0, -torch.ones_like(perm_mat_list[0]), perm_mat_list[0])
                 batch_size = model_output.size()[0]
                 num_points1 = model_output.size()[1]
                 total_loss = 0
@@ -289,16 +313,24 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                     total_cosine_similarities.append(torch.stack(batch_cosine_similarities))
                 # print(torch.stack(total_cosine_similarities).shape, torch.stack(total_cosine_similarities))
                 total_cosine_similarities = torch.stack(total_cosine_similarities).to(model_output.device)
-                print(total_cosine_similarities.shape, total_cosine_similarities)
                 similarity_scores = torch.atanh(total_cosine_similarities)
-                print(similarity_scores.shape, similarity_scores)
-                br
+                # print(similarity_scores.shape, similarity_scores)
+                has_one = perm_mat_list[0].sum(dim=2) != 0
+                expanded_mask = has_one.unsqueeze(-1).expand_as(perm_mat_list[0])
+                # print(expanded_mask.shape, expanded_mask)
+                similarity_scores = similarity_scores.masked_select(expanded_mask).view(-1, perm_mat_list[0].size(2))
+                # print(similarity_scores.shape, similarity_scores)
+                y_values = perm_mat_list[0].masked_select(expanded_mask).view(-1, perm_mat_list[0].size(2))
+                y_values = torch.argmax(y_values, dim=-1)
+                # print(y_values.shape, y_values)
+                # print("++++++++")
+                # print(perm_mat_list[0])
                 # print(total_cosine_similarities.shape)
-                total_probabs = F.sigmoid(total_cosine_similarities)
+                # total_probabs = F.sigmoid(total_cosine_similarities)
                 
-                loss = criterion(total_probabs, perm_mat_list[0])
+                loss = criterion(similarity_scores, y_values)
                 
-                # loss /= len(model_output)
+                # loss /= y_values.shape[0]
 
                 # backward + optimize
                 loss.backward()
@@ -360,7 +392,9 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                     current_data_point = model_output[:,eval_pred_points,:]
                     for b in range(batch_size):
                         cosine_similarities = F.cosine_similarity(model_output[b, eval_pred_points].unsqueeze(0), target_points[b])
-                        cosine_matchings = torch.argmax(cosine_similarities, dim=-1)
+                        cosine_similarities = torch.atanh(cosine_similarities)
+                        cosine_scores = F.softmax(cosine_similarities, dim=-1)
+                        cosine_matchings = torch.argmax(cosine_scores, dim=-1)
                         if eval_pred_points < n_points_gt_list[0][b]:
                             predictions_list[b].append(cosine_matchings.item())
                         else:
@@ -370,12 +404,15 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 prediction_tensor = torch.tensor(predictions_list).to(perm_mat_list[0].device)
                 y_values_matching = torch.argmax(perm_mat_list[0], dim=-1)
                 batch_correct, batch_total_valid = calculate_correct_and_valid(prediction_tensor, y_values_matching)
+                f1_score = calculate_f1_score(prediction_tensor, y_values_matching)
                 # print(prediction_tensor)
                 # print(y_values_matching)
                 # print("------------------")
                 # print(batch_correct, batch_total_valid)
                 epoch_correct += batch_correct
                 epoch_total_valid += batch_total_valid
+                
+                epoch_f1_score += f1_score
                 #         pred_mask = create_pred_mask(s_pred_list.size()[0], n_points_gt_list[0]).to(device)
                 #         # print("EVAAAAAAAL!")
                 #         # print(s_pred_list.size(), s_pred_list)
@@ -439,7 +476,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 # running_acc += acc.item() * bs
                 # epoch_acc += acc.item() * bs
                 # running_f1 += f1.item() * bs
-                # epoch_f1 += f1.item() * bs
+            epoch_f1 += epoch_f1_score
 
                 # if iter_num % cfg.STATISTIC_STEP == 0:
                 #     running_speed = cfg.STATISTIC_STEP * bs / (time.time() - running_since)
@@ -488,8 +525,10 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
             epoch_acc = 0.0
         
         epoch_loss = epoch_loss / dataset_size
+        
+        epoch_f1 = epoch_f1 / dataset_size
         if local_rank == 0:
-            print(f'epoch loss: {epoch_loss}, epoch accuracy: {epoch_acc}')
+            print(f'epoch loss: {epoch_loss}, epoch accuracy: {epoch_acc}, epoch f1_score: {epoch_f1}')
         # epoch_acc = epoch_acc / dataset_size
         # epoch_f1 = epoch_f1 / dataset_size
 
@@ -609,8 +648,8 @@ if __name__ == "__main__":
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
     # criterion = torch.nn.BCEWithLogitsLoss()
-    # criterion = torch.nn.CrossEntropyLoss()
-    criterion = torch.nn.BCELoss()
+    criterion = torch.nn.CrossEntropyLoss()
+    # criterion = torch.nn.BCELoss()
 
     # print(model)
     backbone_params = list(model.module.node_layers.parameters()) + list(model.module.edge_layers.parameters())
@@ -622,11 +661,11 @@ if __name__ == "__main__":
 
     new_params = [param for param in model.parameters() if id(param) not in backbone_ids]
     opt_params = [
-        dict(params=backbone_params, lr=cfg.TRAIN.LR * 0.1),
+        dict(params=backbone_params, lr=cfg.TRAIN.LR * 0.01),
         dict(params=new_params, lr=cfg.TRAIN.LR),
     ]
-    optimizer = optim.RAdam(opt_params, weight_decay=1e-5)
-    # optimizer = optim.Adam(opt_params, weight_decay=1e-3)
+    # optimizer = optim.RAdam(opt_params) #, weight_decay=1e-5
+    optimizer = optim.Adam(opt_params, weight_decay=1e-6)
 
     if not Path(cfg.model_dir).exists():
         Path(cfg.model_dir).mkdir(parents=True)

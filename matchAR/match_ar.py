@@ -111,8 +111,8 @@ class MatchARNet(utils.backbone.VGG16_bn):
         self.tf_decoder = nn.TransformerDecoder(self.tf_decoder_layer, num_layers=cfg.Matching_TF.n_decoder)
         
         
-        # self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024, 512, 256], 512, batch_norm=True)
-        # self.mlp_out_2 = MLP([cfg.Matching_TF.d_model, 512, 1024, 512, 256], 512, batch_norm=True)
+        self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, batch_norm=True)
+        self.mlp_out_2 = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, batch_norm=False)
         self.global_state_dim = 1024
 
         # matched encoding
@@ -243,15 +243,16 @@ class MatchARNet(utils.backbone.VGG16_bn):
         # print(source_points_mask.size())
         # print(target_points.size(), target_points)
         # print(source_points.size(),source_points) 
-        if eval_pred_points is not None:
-            source_points[:,eval_pred_points+1:,:] = 0
-        decoder_output = self.tf_decoder(tgt= source_points,
-                                          memory= target_points,
+        
+        # if eval_pred_points is not None:
+        #     source_points[:,eval_pred_points+1:,:] = 0
+        decoder_output = self.tf_decoder(tgt=source_points,
+                                          memory=target_points, # encoder_output
                                           tgt_mask=source_points_mask) # TODO: tgt_key_padding_mask=query_mask ?
         
         #TODO: test if with MLP and batchnorm or not / leave out mlp
         # print(decoder_output)
-        # decoder_output = self.mlp_out(decoder_output)
+        decoder_output = self.mlp_out(decoder_output)
         # target_points = self.mlp_out_2(target_points)
     
         return target_points, decoder_output
