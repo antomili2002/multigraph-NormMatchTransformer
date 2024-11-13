@@ -21,7 +21,9 @@ import numpy as np
 # tensor_2 = torch.tensor([6, 2])
 # split_result = split_tensor(tensor_1, tensor_2)
 # print(split_result)
-
+tgt_padding_mask = torch.zeros((2,10), dtype=torch.bool)
+tgt_padding_mask[:,:1] = 1
+print(tgt_padding_mask)
 
 # b = []
 # for i in range(3):

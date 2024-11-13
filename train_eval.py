@@ -7,7 +7,6 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 
-
 from torch.utils.data import DataLoader, Subset, DistributedSampler
 from sklearn.model_selection import train_test_split
 import numpy as np
@@ -19,8 +18,8 @@ import pandas as pd
 import matplotlib
 
 
+from sklearn.metrics import f1_score
 from data.data_loader_multigraph import GMDataset, get_dataloader
-from utils.evaluation_metric import matching_accuracy_from_lists, f1_score, get_pos_neg_from_lists, make_perm_mat_pred, make_sampled_perm_mat_pred
 import eval
 from matchAR import Net, SimpleNet, EncoderNet, ResMatcherNet, MatchARNet
 from utils.config import cfg
@@ -43,7 +42,8 @@ class HammingLoss(torch.nn.Module):
 
 lr_schedules = {
     #TODO: CHANGE BACK TO 10
-    "long_halving": (30, (3, 6, 12, 26), 0.25),
+    "long_halving": (30, (2, 4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
+    # "long_halving": (30, (3, 6, 12, 26), 0.25),
     # "long_halving": (50, (40,), 0.1),
     "short_halving": (2, (1,), 0.5),
     "long_nodrop": (10, (10,), 1.0),
@@ -143,17 +143,12 @@ def calculate_f1_score(prediction_tensor, y_values_matching):
     valid_preds = prediction_tensor[valid_mask]
     valid_labels = y_values_matching[valid_mask]
 
-    # Calculate TP, FP, and FN
-    tp = ((valid_preds == valid_labels) & (valid_preds != -1)).sum().item()
-    fp = ((valid_preds != valid_labels) & (valid_preds != -1)).sum().item()
-    fn = ((valid_labels != valid_preds) & (valid_labels != -1)).sum().item()
+    valid_preds = valid_preds.cpu().numpy()
+    valid_labels = valid_labels.cpu().numpy()
+    
+    f1_score_ = f1_score(valid_labels, valid_preds, average='micro')
 
-    # Compute Precision, Recall, and F1 Score
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-    f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
-
-    return f1_score
+    return f1_score_
 
 
 def split_tensor(tensor_1, tensor_2):
@@ -232,7 +227,6 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
 
         epoch_loss_2 = 0
         epoch_loss = 0.0
-        epoch_f1_score = 0
         running_loss = 0.0
         running_acc = 0.0
         epoch_acc = 0.0
@@ -245,7 +239,6 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         # Iterate over data.
         epoch_correct = 0
         epoch_total_valid = 0
-        epoch_f1_score = 0
         modeL_parameter_list = list(model.parameters())
         # print(modeL_parameter_list[-1:])
         for inputs in dataloader["train"]:
@@ -296,8 +289,6 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 
                 target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
                 
-                
-                # target_similarity = torch.where(perm_mat_list[0] == 0, -torch.ones_like(perm_mat_list[0]), perm_mat_list[0])
                 batch_size = model_output.size()[0]
                 num_points1 = model_output.size()[1]
                 total_loss = 0
@@ -311,22 +302,12 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                         cosine_similarities = F.cosine_similarity(model_output[b, i].unsqueeze(0), target_points[b])
                         batch_cosine_similarities.append(cosine_similarities)
                     total_cosine_similarities.append(torch.stack(batch_cosine_similarities))
-                # print(torch.stack(total_cosine_similarities).shape, torch.stack(total_cosine_similarities))
                 total_cosine_similarities = torch.stack(total_cosine_similarities).to(model_output.device)
                 similarity_scores = torch.atanh(total_cosine_similarities)
-                # print(similarity_scores.shape, similarity_scores)
                 has_one = perm_mat_list[0].sum(dim=2) != 0
                 expanded_mask = has_one.unsqueeze(-1).expand_as(perm_mat_list[0])
-                # print(expanded_mask.shape, expanded_mask)
                 similarity_scores = similarity_scores.masked_select(expanded_mask).view(-1, perm_mat_list[0].size(2))
-                # print(similarity_scores.shape, similarity_scores)
                 y_values = perm_mat_list[0].masked_select(expanded_mask).view(-1, perm_mat_list[0].size(2))
-                y_values = torch.argmax(y_values, dim=-1)
-                # print(y_values.shape, y_values)
-                # print("++++++++")
-                # print(perm_mat_list[0])
-                # print(total_cosine_similarities.shape)
-                # total_probabs = F.sigmoid(total_cosine_similarities)
                 
                 loss = criterion(similarity_scores, y_values)
                 
@@ -385,8 +366,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                     predictions_list.append([])
                 for np in range(N_t):
                     
-            #         # print("EVAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-                    target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_sample, perm_mat_list, eval_pred_points, in_training= False)
+                    target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list,  perm_mat_list, n_points_sample, eval_pred_points, in_training= False)
                     batch_size = model_output.size()[0]
                     num_points1 = model_output.size()[1]
                     current_data_point = model_output[:,eval_pred_points,:]
@@ -404,7 +384,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 prediction_tensor = torch.tensor(predictions_list).to(perm_mat_list[0].device)
                 y_values_matching = torch.argmax(perm_mat_list[0], dim=-1)
                 batch_correct, batch_total_valid = calculate_correct_and_valid(prediction_tensor, y_values_matching)
-                f1_score = calculate_f1_score(prediction_tensor, y_values_matching)
+                f1_score_ = calculate_f1_score(prediction_tensor, y_values_matching)
                 # print(prediction_tensor)
                 # print(y_values_matching)
                 # print("------------------")
@@ -412,113 +392,14 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 epoch_correct += batch_correct
                 epoch_total_valid += batch_total_valid
                 
-                epoch_f1_score += f1_score
-                #         pred_mask = create_pred_mask(s_pred_list.size()[0], n_points_gt_list[0]).to(device)
-                #         # print("EVAAAAAAAL!")
-                #         # print(s_pred_list.size(), s_pred_list)
-                #         # print(pred_mask.size(), pred_mask)
-                #         pred_mask = pred_mask.unsqueeze(-1).expand_as(s_pred_list)
-                #         s_pred_list_masked = s_pred_list[pred_mask].view(-1, s_pred_list.size()[-1])
-                #         # print(s_pred_list_masked.size(), s_pred_list_masked)
-                #         pred_probabs = F.softmax(s_pred_list_masked, dim=-1)
-                #         y_preds = torch.argmax(pred_probabs, dim=-1)
-                #         # print(y_preds)
-                #         split_result = split_tensor(y_preds, n_points_gt_list[0])
-                #         # print(split_result)
-                        
-                #         for i in range(B):
-                #             if j_pred <= split_result[i].size()[0]-1:
-                #                 eval_pred_points[i].append(split_result[i][j_pred].item())
-                #         # print(eval_pred_points)
-                #         j_pred +=1
-                #         # scores = s_pred_list.view(B, N_s, N_t)
-                        
-                #         # #apply matched mask to matching scores
-                #         # scores[cost_mask == -1] = -torch.inf
-                        
-                #         # scores_per_batch = [scores[x,:,:] for x in range(B)]
-                #         # argmax_idx = [torch.argmax(sc) for sc in scores_per_batch]
-                #         # pair_idx = torch.tensor([(x // N_s, x % N_s) for x in  argmax_idx])
-                        
-                #         # # update mask of matched nodes
-                #         # cost_mask[batch_idx, pair_idx[:,0], :] = -1
-                #         # cost_mask[batch_idx, :, pair_idx[:,1]] = -1
-                        
-                #         # #update permutation matrix
-                #         # perm_mat_dec_list[0][batch_idx, pair_idx[:,0], pair_idx[:,1]] = 1
-                #         # #update numnber of points sampled
-                #         # n_points_sample += 1 
-                        
-                #         # matchings.append(pair_idx)
-                                        
-                #     matchings = torch.stack(matchings, dim=2)
-                #     matches_list = []
-                #     s_pred_mat_list = []
-                #     perm_mat_gt_list = []
-                #     for batch in batch_idx:
-                #         n_point = n_points_gt_list[0][batch]
-                #         matched_idxes  = matchings[batch,:, :n_point]
-                #         matches_list.append(matched_idxes)
-                #         s_pred_mat = torch.zeros(n_point, n_point).to(perm_mat_list[0].device)
-                #         s_pred_mat[matched_idxes[0,:], matched_idxes[1,:]] = 1
-                #         s_pred_mat_list.append(s_pred_mat)
-                #         perm_mat_gt_list.append(perm_mat_list[0][batch,:n_point, :n_point])
                 
-                # evaluation metrics
-                # acc, _acc_match_num, _acc_total_num = matching_accuracy_from_lists(s_pred_mat_list, perm_mat_gt_list)
-                # _tp, _fp, _fn = get_pos_neg_from_lists(s_pred_mat_list, perm_mat_gt_list)
-                # f1 = f1_score(_tp, _fp, _fn)
-
-                # # statistics
+                
+                
+                
             bs = perm_mat_list[0].size(0)
-            # running_loss += loss.item() * bs  # multiply with batch size
-            epoch_loss += loss.item() #* bs
-                # running_acc += acc.item() * bs
-                # epoch_acc += acc.item() * bs
-                # running_f1 += f1.item() * bs
-            epoch_f1 += epoch_f1_score
-
-                # if iter_num % cfg.STATISTIC_STEP == 0:
-                #     running_speed = cfg.STATISTIC_STEP * bs / (time.time() - running_since)
-                #     loss_avg = running_loss / cfg.STATISTIC_STEP / bs
-                #     acc_avg = running_acc / cfg.STATISTIC_STEP / bs
-                #     f1_avg = running_f1 / cfg.STATISTIC_STEP / bs
-                #     # print(
-                #     #     "Epoch {:<4} Iter {:<4} {:>4.2f}sample/s Loss={:<8.4f} Accuracy={:<2.3} F1={:<2.3}".format(
-                #     #         epoch, iter_num, running_speed, loss_avg, acc_avg, f1_avg
-                #     #     )
-                #     # )
-                #     """
-                #     if cfg.MODEL_ARCH == 'tf':
-                #         grad_norm_model = compute_grad_norm(model.parameters())
-                #         grad_norm_splineCNN = compute_grad_norm(model.psi.parameters())
-                #         grad_norm_encoder = compute_grad_norm(model.transformer.encoder.parameters())
-                #         grad_norm_decoder = compute_grad_norm(model.transformer.decoder.parameters())
-                #         grad_mlp_query = compute_grad_norm(model.mlp.parameters())
-                #         grad_mlp_out = compute_grad_norm(model.mlp_out.parameters())
-
-                #         wandb.log({"train_loss": loss_avg, "train_acc": acc_avg, "train_f1": f1_avg, 
-                #                 "grad_model": grad_norm_model, "grad_splineCNN": grad_norm_splineCNN,  
-                #                     "grad_mlp_out": grad_mlp_out, "grad_mlp_query": grad_mlp_query, 
-                #                     "grad_encoder": grad_norm_encoder, "grad_decoder": grad_norm_decoder})
-                #     else:
-                #         grad_norm_model = compute_grad_norm(model.parameters())
-                #         grad_norm_splineCNN = compute_grad_norm(model.psi.parameters())
-                #         grad_norm_encoder = compute_grad_norm(model.encoder.parameters())
-                #         grad_mlp_query = compute_grad_norm(model.mlp.parameters())
-                #         grad_mlp_out = compute_grad_norm(model.mlp_out.parameters())
-
-                #         wandb.log({"train_loss": loss_avg, "train_acc": acc_avg, "train_f1": f1_avg, 
-                #                 "grad_model": grad_norm_model, "grad_splineCNN": grad_norm_splineCNN,  
-                #                 "grad_mlp_out": grad_mlp_out, "grad_mlp_query": grad_mlp_query, 
-                #                 "grad_encoder": grad_norm_encoder})
-                #     """
-                #     # wandb.log({"train_loss": loss_avg, "train_acc": acc_avg, "train_f1": f1_avg})
-
-                #     running_acc = 0.0
-                #     running_f1 = 0.0
-                #     running_loss = 0.0
-                #     running_since = time.time()
+            epoch_loss += loss.item() 
+            epoch_f1 += f1_score_
+            
         if epoch_total_valid > 0:
             epoch_acc = epoch_correct / epoch_total_valid
         else:
@@ -529,43 +410,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         epoch_f1 = epoch_f1 / dataset_size
         if local_rank == 0:
             print(f'epoch loss: {epoch_loss}, epoch accuracy: {epoch_acc}, epoch f1_score: {epoch_f1}')
-        # epoch_acc = epoch_acc / dataset_size
-        # epoch_f1 = epoch_f1 / dataset_size
-
-        # # wandb.log({"ep_loss": epoch_loss, "ep_acc": epoch_acc, "ep_f1": epoch_f1})
-
-
-        # if cfg.save_checkpoint:
-        #     base_path = Path(checkpoint_path / "{:04}".format(epoch + 1))
-        #     Path(base_path).mkdir(parents=True, exist_ok=True)
-        #     path = str(base_path / "params.pt")
-        #     torch.save(model.state_dict(), path)
-        #     torch.save(optimizer.state_dict(), str(base_path / "optim.pt"))
-
-        # print(
-        #     "Over whole epoch {:<4} -------- Loss: {:.4f} Accuracy: {:.3f} F1: {:.3f}".format(
-        #         epoch, epoch_loss, epoch_acc, epoch_f1
-        #     )
-        # )
-
-        # print()
-        # # Eval in each epoch
-        # if (epoch+1) % 5 == 0 :
-        #     accs, f1_scores, _ = eval.eval_model(model, dataloader["test"])
-        #     acc_dict = {
-        #         "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.classes, accs)
-        #     }
-        #     f1_dict = {
-        #         "f1_{}".format(cls): single_f1_score
-        #         for cls, single_f1_score in zip(dataloader["train"].dataset.classes, f1_scores)
-        #     }
-        #     acc_dict.update(f1_dict)
-        #     acc_dict["matching_accuracy"] = torch.mean(accs)
-        #     acc_dict["f1_score"] = torch.mean(f1_scores)
-
-        # # wandb.log({"mean test_acc": torch.mean(accs), "mean test_f1": torch.mean(f1_scores)})
-        # avg_loss_2 = epoch_loss_2 / len(dataloader["train"])
-        # print("avg loss:", avg_loss_2)
+            
+            
         scheduler.step()
 
     # time_elapsed = time.time() - since
@@ -665,7 +511,7 @@ if __name__ == "__main__":
         dict(params=new_params, lr=cfg.TRAIN.LR),
     ]
     # optimizer = optim.RAdam(opt_params) #, weight_decay=1e-5
-    optimizer = optim.Adam(opt_params, weight_decay=1e-6)
+    optimizer = optim.Adam(opt_params, weight_decay=1e-5)
 
     if not Path(cfg.model_dir).exists():
         Path(cfg.model_dir).mkdir(parents=True)

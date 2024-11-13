@@ -153,7 +153,6 @@ class MatchARNet(utils.backbone.VGG16_bn):
         eval_pred_points=None,
         in_training=True
     ):
-        
         batch_size = graphs[0].num_graphs
         global_list = []
         orig_graph_list = []
@@ -240,10 +239,18 @@ class MatchARNet(utils.backbone.VGG16_bn):
         batch_size, seq_len, _ = source_points.size()
         source_points_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1).to(source_points.device)#(1 - torch.triu(torch.ones((batch_size, sample_size_each, sample_size_each)), diagonal=1)).bool()
         # print(source_points.size())
-        # print(source_points_mask.size())
+        # print(source_points_mask.shape)
         # print(target_points.size(), target_points)
-        # print(source_points.size(),source_points) 
-        
+        # print(source_points.size(),source_points)
+        tgt_padding_mask = torch.ones((batch_size, seq_len)).to(source_points_mask.device)
+        if eval_pred_points is not None:
+            tgt_padding_mask = torch.zeros((batch_size, seq_len), dtype=torch.bool).to(source_points_mask.device)
+            for i in range(batch_size):
+                if eval_pred_points < n_points[0][i]:
+                    tgt_padding_mask[i,:eval_pred_points+1] = 1
+                    
+
+                
         # if eval_pred_points is not None:
         #     source_points[:,eval_pred_points+1:,:] = 0
         decoder_output = self.tf_decoder(tgt=source_points,
@@ -252,8 +259,8 @@ class MatchARNet(utils.backbone.VGG16_bn):
         
         #TODO: test if with MLP and batchnorm or not / leave out mlp
         # print(decoder_output)
-        decoder_output = self.mlp_out(decoder_output)
-        # target_points = self.mlp_out_2(target_points)
+        # decoder_output = self.mlp_out(decoder_output)
+        # target_points = self.mlp_out(target_points)
     
         return target_points, decoder_output
         

@@ -1,5 +1,5 @@
 {
-  "BATCH_SIZE": 4,
+  "BATCH_SIZE": 2,
   "DATASET_NAME": "PascalVOC",
   "exclude_willow_classes": false,
   "EVAL": {
@@ -21,7 +21,7 @@
     "pos_encoding": false,
     "n_lap_EigVec": 8
   },
-  "train_sampling": "intersection",
+  "train_sampling": "superset",
   "eval_sampling": "intersection",
   "save_checkpoint": true,
   "RANDOM_SEED": 123,
@@ -30,7 +30,7 @@
     "EPOCH_ITERS": 25,
     "LR": 0.0002,
     "lr_schedule": "long_halving",
-    "clip_norm": 0.5,
+    "clip_norm": 0.01,
     "num_graphs_in_matching_instance": 2,
     "random_swap": false,
     "AR": true
