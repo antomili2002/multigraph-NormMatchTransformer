@@ -138,10 +138,12 @@ def create_pred_mask(batch_size, n_points_list, target_length=40):
     return mask
 
 def calculate_f1_score(prediction_tensor, y_values_matching):
+    
     # Mask to filter out invalid predictions/labels
     valid_mask = (prediction_tensor != -1) & (y_values_matching != -1)
     valid_preds = prediction_tensor[valid_mask]
     valid_labels = y_values_matching[valid_mask]
+    
 
     valid_preds = valid_preds.cpu().numpy()
     valid_labels = valid_labels.cpu().numpy()
@@ -166,7 +168,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
     since = time.time()
     dataloader["train"].dataset.set_num_graphs(cfg.TRAIN.num_graphs_in_matching_instance)
     dataset_size = len(dataloader["train"].dataset)
-
+    
 
     device = next(model.parameters()).device
     if local_rank == 0:
@@ -360,6 +362,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 #     cost_mask[batch, n_point:, :] = -1
                 #     cost_mask[batch, :, n_point:] = -1 # ?
                 eval_pred_points = 0
+                j_pred = 0
                 predictions_list = []
                 for i in range(B):
                     predictions_list.append([])
@@ -368,7 +371,6 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                     target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list,  perm_mat_list, n_points_sample, eval_pred_points, in_training= False)
                     batch_size = model_output.size()[0]
                     num_points1 = model_output.size()[1]
-                    current_data_point = model_output[:,eval_pred_points,:]
                     for b in range(batch_size):
                         cosine_similarities = F.cosine_similarity(model_output[b, eval_pred_points].unsqueeze(0), target_points[b])
                         cosine_similarities = torch.atanh(cosine_similarities)
@@ -396,13 +398,14 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 
                 
             bs = perm_mat_list[0].size(0)
-            epoch_loss += loss.item() 
-            epoch_f1 += f1_score_
+            epoch_loss += loss.item() * bs
+            epoch_f1 += f1_score_ * bs
             
         if epoch_total_valid > 0:
             epoch_acc = epoch_correct / epoch_total_valid
         else:
             epoch_acc = 0.0
+        
         
         epoch_loss = epoch_loss / dataset_size
         
@@ -509,8 +512,8 @@ if __name__ == "__main__":
         dict(params=backbone_params, lr=cfg.TRAIN.LR * 0.01),
         dict(params=new_params, lr=cfg.TRAIN.LR),
     ]
-    # optimizer = optim.RAdam(opt_params) #, weight_decay=1e-5
-    optimizer = optim.Adam(opt_params, weight_decay=1e-5)
+    optimizer = optim.RAdam(opt_params) #, weight_decay=1e-5
+    # optimizer = optim.Adam(opt_params, weight_decay=1e-5)
 
     if not Path(cfg.model_dir).exists():
         Path(cfg.model_dir).mkdir(parents=True)
