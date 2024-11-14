@@ -90,7 +90,6 @@ def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
                     predictions_list.append([])
                 for np in range(N_t):
                     
-                    print()
                     model(data_list, points_gt, edges, n_points_gt,  perm_mat_list, n_points_sample, eval_pred_points, in_training= False)
                     # model prediction
                     # s_pred_list = model(

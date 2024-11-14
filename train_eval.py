@@ -218,6 +218,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         optimizer, milestones=lr_milestones, gamma=lr_decay
     )
     
+    _, _ = eval.eval_model(model, dataloader["test"], local_rank)
+    br
     for epoch in range(start_epoch, num_epochs):
         if local_rank == 0:
             print("Epoch {}/{}".format(epoch, num_epochs - 1))
