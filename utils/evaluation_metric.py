@@ -1,4 +1,5 @@
 import torch
+from sklearn.metrics import f1_score
 
 def make_perm_mat_pred(matching_vec, num_nodes_t):
 
@@ -51,21 +52,44 @@ def make_sampled_perm_mat_pred(matching_vec, n_sampled_list):
 #     return torch.stack(perm_mat_pred)
 
 
-def f1_score(tp, fp, fn):
-    """
-    F1 score (harmonic mix of precision and recall) between predicted permutation matrix and ground truth permutation matrix.
-    :param tp: number of true positives
-    :param fp: number of false positives
-    :param fn: number of false negatives
-    :return: F1 score
-    """
-    device = tp.device
+# def f1_score(tp, fp, fn):
+#     """
+#     F1 score (harmonic mix of precision and recall) between predicted permutation matrix and ground truth permutation matrix.
+#     :param tp: number of true positives
+#     :param fp: number of false positives
+#     :param fn: number of false negatives
+#     :return: F1 score
+#     """
+#     device = tp.device
 
-    const = torch.tensor(1e-7, device=device)
-    precision = tp / (tp + fp + const)
-    recall = tp / (tp + fn + const)
-    f1 = 2 * precision * recall / (precision + recall + const)
-    return f1
+#     const = torch.tensor(1e-7, device=device)
+#     precision = tp / (tp + fp + const)
+#     recall = tp / (tp + fn + const)
+#     f1 = 2 * precision * recall / (precision + recall + const)
+#     return f1
+
+
+def calculate_correct_and_valid(prediction_tensor, y_values_matching):
+    valid_mask = (prediction_tensor != -1) & (y_values_matching != -1)
+    batch_correct = (prediction_tensor[valid_mask] == y_values_matching[valid_mask]).sum().item()
+    batch_total_valid = valid_mask.sum().item()
+    return batch_correct, batch_total_valid
+
+
+def calculate_f1_score(prediction_tensor, y_values_matching):
+    
+    # Mask to filter out invalid predictions/labels
+    valid_mask = (prediction_tensor != -1) & (y_values_matching != -1)
+    valid_preds = prediction_tensor[valid_mask]
+    valid_labels = y_values_matching[valid_mask]
+    
+
+    valid_preds = valid_preds.cpu().numpy()
+    valid_labels = valid_labels.cpu().numpy()
+    
+    f1_score_ = f1_score(valid_labels, valid_preds, average='micro')
+
+    return f1_score_
 
 
 def get_pos_neg(pmat_pred, pmat_gt):

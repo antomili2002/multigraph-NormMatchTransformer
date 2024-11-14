@@ -24,14 +24,9 @@ import eval
 from matchAR import Net, SimpleNet, EncoderNet, ResMatcherNet, MatchARNet
 from utils.config import cfg
 from utils.utils import update_params_from_cmdline, compute_grad_norm
+from utils.evaluation_metric import calculate_correct_and_valid, calculate_f1_score
 
 
-
-def calculate_correct_and_valid(prediction_tensor, y_values_matching):
-    valid_mask = (prediction_tensor != -1) & (y_values_matching != -1)
-    batch_correct = (prediction_tensor[valid_mask] == y_values_matching[valid_mask]).sum().item()
-    batch_total_valid = valid_mask.sum().item()
-    return batch_correct, batch_total_valid
 
 
 class HammingLoss(torch.nn.Module):
@@ -137,20 +132,7 @@ def create_pred_mask(batch_size, n_points_list, target_length=40):
 
     return mask
 
-def calculate_f1_score(prediction_tensor, y_values_matching):
-    
-    # Mask to filter out invalid predictions/labels
-    valid_mask = (prediction_tensor != -1) & (y_values_matching != -1)
-    valid_preds = prediction_tensor[valid_mask]
-    valid_labels = y_values_matching[valid_mask]
-    
 
-    valid_preds = valid_preds.cpu().numpy()
-    valid_labels = valid_labels.cpu().numpy()
-    
-    f1_score_ = f1_score(valid_labels, valid_preds, average='micro')
-
-    return f1_score_
 
 
 def split_tensor(tensor_1, tensor_2):
@@ -218,8 +200,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         optimizer, milestones=lr_milestones, gamma=lr_decay
     )
     
-    _, _ = eval.eval_model(model, dataloader["test"], local_rank)
-    br
+    
     for epoch in range(start_epoch, num_epochs):
         if local_rank == 0:
             print("Epoch {}/{}".format(epoch, num_epochs - 1))
@@ -417,7 +398,13 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
             
             
         scheduler.step()
+        
+        
+        if (epoch+1) % cfg.STATISTIC_STEP == 0:
+            if local_rank == 0:
+                _, _ = eval.eval_model(model, dataloader["test"], local_rank)
 
+    
     # time_elapsed = time.time() - since
     # print(
     #     "Training complete in {:.0f}h {:.0f}m {:.0f}s".format(

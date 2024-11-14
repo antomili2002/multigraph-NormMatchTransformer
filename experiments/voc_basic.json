@@ -3,7 +3,7 @@
   "DATASET_NAME": "PascalVOC",
   "exclude_willow_classes": false,
   "EVAL": {
-    "SAMPLES": 1000,
+    "SAMPLES": 20,
     "num_graphs_in_matching_instance": 2
   },
   "SPLINE_CNN": {

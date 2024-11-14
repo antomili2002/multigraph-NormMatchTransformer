@@ -2,11 +2,11 @@ import time
 from pathlib import Path
 import numpy as np
 import torch
+import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 
 from utils.config import cfg
-from utils.evaluation_metric import matching_accuracy, f1_score, get_pos_neg, make_perm_mat_pred, matching_accuracy_from_lists, get_pos_neg_from_lists
-
+from utils.evaluation_metric import calculate_correct_and_valid, calculate_f1_score
 
 def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
     print("Start evaluation...")
@@ -50,6 +50,9 @@ def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
         # for analysis of each step accuracy
         error_dist_dict[cls] = []
 
+        epoch_f1 = 0.0
+        epoch_correct = 0
+        epoch_total_valid = 0
         for k, inputs in enumerate(dataloader):
             data_list = [_.cuda() for _ in inputs["images"]]
 
@@ -73,96 +76,94 @@ def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
                 matchings = []
                 B, N_s, N_t = perm_mat_list[0].size()
                 n_points_sample = torch.zeros(B, dtype=torch.int).to(device)
-                perm_mat_dec_list = [torch.zeros(B, N_s, N_t, dtype=torch.int).to(device)]
-                cost_mask = torch.ones(B, N_s, N_t, dtype=torch.int).to(device)
-                batch_idx = torch.arange(cfg.BATCH_SIZE)
+                # perm_mat_dec_list = [torch.zeros(B, N_s, N_t, dtype=torch.int).to(device)]
+                # cost_mask = torch.ones(B, N_s, N_t, dtype=torch.int).to(device)
+                # batch_idx = torch.arange(cfg.BATCH_SIZE)
             
                 # set matching score for padded to zero
-                for batch in batch_idx:
-                    n_point = n_points_gt[0][batch]
-                    cost_mask[batch, n_point:, :] = -1
-                    cost_mask[batch, :, n_point:] = -1
+                # for batch in batch_idx:
+                #     n_point = n_points_gt[0][batch]
+                #     cost_mask[batch, n_point:, :] = -1
+                #     cost_mask[batch, :, n_point:] = -1
                 
                 eval_pred_points = 0
                 j_pred = 0
                 predictions_list = []
                 for i in range(B):
                     predictions_list.append([])
+                    
                 for np in range(N_t):
                     
-                    model(data_list, points_gt, edges, n_points_gt,  perm_mat_list, n_points_sample, eval_pred_points, in_training= False)
-                    # model prediction
-                    # s_pred_list = model(
-                    #     data_list,
-                    #     points_gt,
-                    #     edges,
-                    #     n_points_gt,
-                    #     n_points_sample,
-                    #     perm_mat_dec_list,
-                    #     in_training= False
-                    # )
-                    scores = s_pred_list.view(B, N_s, N_t)
+                    target_points, model_output = model(data_list, points_gt, edges, n_points_gt,  perm_mat_list, n_points_sample, eval_pred_points, in_training= False)
+                    batch_size = model_output.size()[0]
+                    num_points1 = model_output.size()[1]
+                    for b in range(batch_size):
+                        cosine_similarities = F.cosine_similarity(model_output[b, eval_pred_points].unsqueeze(0), target_points[b])
+                        cosine_similarities = torch.atanh(cosine_similarities)
+                        cosine_scores = F.softmax(cosine_similarities, dim=-1)
+                        cosine_matchings = torch.argmax(cosine_scores, dim=-1)
+                        if eval_pred_points < n_points_gt[0][b]:
+                            predictions_list[b].append(cosine_matchings.item())
+                        else:
+                            predictions_list[b].append(-1)
                     
-                    #apply matched mask to matching scores
-                    scores[cost_mask == -1] = -torch.inf
-                    
-                    scores_per_batch = [scores[x,:,:] for x in range(B)]
-                    argmax_idx = [torch.argmax(sc) for sc in scores_per_batch]
-                    pair_idx = torch.tensor([(x // N_s, x % N_s) for x in  argmax_idx])
-                    
-                    # update mask of matched nodes
-                    cost_mask[batch_idx, pair_idx[:,0], :] = -1
-                    cost_mask[batch_idx, :, pair_idx[:,1]] = -1
-                    
-                    #update permutation matrix
-                    perm_mat_dec_list[0][batch_idx, pair_idx[:,0], pair_idx[:,1]] = 1
-                    #update numnber of points sampled
-                    n_points_sample += 1 
-
-                    # ground truth label and pred at each step: distribution of errors in AR
-                    gt = torch.nonzero(perm_mat_list[0][batch_idx, pair_idx[:,0], :] == 1)[:,1].to(pair_idx.device)
-                    pred = pair_idx[:,1]
-                    matched_instances_at_step.append(gt == pred)
-
-                    matchings.append(pair_idx)
+                    eval_pred_points +=1
+                prediction_tensor = torch.tensor(predictions_list).to(perm_mat_list[0].device)
+                y_values_matching = torch.argmax(perm_mat_list[0], dim=-1)
+                batch_correct, batch_total_valid = calculate_correct_and_valid(prediction_tensor, y_values_matching)
+                f1_score_ = calculate_f1_score(prediction_tensor, y_values_matching)
                 
-                matched_instance_indicator = torch.stack(matched_instances_at_step, dim=1)
-                for example in range(len(matched_instance_indicator)):
-                    n_point= n_points_gt[0][example]
-                    error_dist_dict[cls].append(matched_instance_indicator[example, :n_point].long())
+                epoch_correct += batch_correct
+                epoch_total_valid += batch_total_valid
+                # matched_instance_indicator = torch.stack(matched_instances_at_step, dim=1)
+                # for example in range(len(matched_instance_indicator)):
+                #     n_point= n_points_gt[0][example]
+                #     error_dist_dict[cls].append(matched_instance_indicator[example, :n_point].long())
                     
                 
-                matchings = torch.stack(matchings, dim=2)
+                # matchings = torch.stack(matchings, dim=2)
 
-                matches_list = []
-                s_pred_mat_list = []
-                perm_mat_gt_list = []
-                for batch in batch_idx:
-                    n_point = n_points_gt[0][batch]
-                    matched_idxes  = matchings[batch,:, :n_point]
-                    matches_list.append(matched_idxes)
-                    s_pred_mat = torch.zeros(n_point, n_point).to(perm_mat_list[0].device)
-                    s_pred_mat[matched_idxes[0,:], matched_idxes[1,:]] = 1
-                    s_pred_mat_list.append(s_pred_mat)
-                    perm_mat_gt_list.append(perm_mat_list[0][batch,:n_point, :n_point])
-                
+                # matches_list = []
+                # s_pred_mat_list = []
+                # perm_mat_gt_list = []
+                # for batch in batch_idx:
+                #     n_point = n_points_gt[0][batch]
+                #     matched_idxes  = matchings[batch,:, :n_point]
+                #     matches_list.append(matched_idxes)
+                #     s_pred_mat = torch.zeros(n_point, n_point).to(perm_mat_list[0].device)
+                #     s_pred_mat[matched_idxes[0,:], matched_idxes[1,:]] = 1
+                #     s_pred_mat_list.append(s_pred_mat)
+                #     perm_mat_gt_list.append(perm_mat_list[0][batch,:n_point, :n_point])
+            
+            bs = perm_mat_list[0].size(0)
+            epoch_f1 += f1_score_ * bs  
             # evaluation metrics
-            _, _acc_match_num, _acc_total_num = matching_accuracy_from_lists(s_pred_mat_list, perm_mat_gt_list)
-            _tp, _fp, _fn = get_pos_neg_from_lists(s_pred_mat_list, perm_mat_gt_list)
+            # _, _acc_match_num, _acc_total_num = matching_accuracy_from_lists(s_pred_mat_list, perm_mat_gt_list)
+            # _tp, _fp, _fn = get_pos_neg_from_lists(s_pred_mat_list, perm_mat_gt_list)
 
-            acc_match_num += _acc_match_num
-            acc_total_num += _acc_total_num
-            tp += _tp
-            fp += _fp
-            fn += _fn
+            # acc_match_num += _acc_match_num
+            # acc_total_num += _acc_total_num
+            # tp += _tp
+            # fp += _fp
+            # fn += _fn
 
             if iter_num % cfg.STATISTIC_STEP == 0 and verbose:
                 running_speed = cfg.STATISTIC_STEP * batch_num / (time.time() - running_since)
                 print("Class {:<8} Iteration {:<4} {:>4.2f}sample/s".format(cls, iter_num, running_speed))
                 running_since = time.time()
+        
+        
+        dataset_size = len(dataloader.dataset)
+        
+        if epoch_total_valid > 0:
+            epoch_acc = epoch_correct / epoch_total_valid
+        else:
+            epoch_acc = 0.0
 
-        accs[i] = acc_match_num / acc_total_num
-        f1_scores[i] = f1_score(tp, fp, fn)
+        epoch_f1 = epoch_f1 / dataset_size
+        
+        accs[i] = epoch_acc
+        f1_scores[i] = epoch_f1
         if verbose:
             print("Class {} acc = {:.4f} F1 = {:.4f}".format(cls, accs[i], f1_scores[i]))
         
@@ -179,27 +180,27 @@ def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
     print("average = {:.4f}, {:.4f}".format(torch.mean(accs), torch.mean(f1_scores)))
 
     # error distribution
-    err_dist={}
-    num_bins = 5
-    for cls, v in error_dist_dict.items():
-        matched_instances_size = max([tensor.size(0) for tensor in v ])
-        n_matched_instances = torch.zeros(matched_instances_size)
+    # err_dist={}
+    # num_bins = 5
+    # for cls, v in error_dist_dict.items():
+    #     matched_instances_size = max([tensor.size(0) for tensor in v ])
+    #     n_matched_instances = torch.zeros(matched_instances_size)
 
-        n_possible_matches  = [torch.ones(tensor.size(0)) for tensor in v]
-        total_instances_to_match = torch.zeros(matched_instances_size)
-        for tensor in v:
-            n_matched_instances[:tensor.size(0)] += tensor
-        for tensor in n_possible_matches:
-            total_instances_to_match[:tensor.size(0)] += tensor
+    #     n_possible_matches  = [torch.ones(tensor.size(0)) for tensor in v]
+    #     total_instances_to_match = torch.zeros(matched_instances_size)
+    #     for tensor in v:
+    #         n_matched_instances[:tensor.size(0)] += tensor
+    #     for tensor in n_possible_matches:
+    #         total_instances_to_match[:tensor.size(0)] += tensor
         
-        indices = torch.arange(matched_instances_size)
-        bin_edges = torch.linspace(0, matched_instances_size, num_bins)
-        binned_indices = torch.bucketize(indices, bin_edges)
+    #     indices = torch.arange(matched_instances_size)
+    #     bin_edges = torch.linspace(0, matched_instances_size, num_bins)
+    #     binned_indices = torch.bucketize(indices, bin_edges)
         
-        binned_matches = torch.bincount(binned_indices, weights=n_matched_instances)
-        binned_counts = torch.bincount(binned_indices, weights=total_instances_to_match)
+    #     binned_matches = torch.bincount(binned_indices, weights=n_matched_instances)
+    #     binned_counts = torch.bincount(binned_indices, weights=total_instances_to_match)
         
-        cls_error_distribution = binned_matches / binned_counts
-        err_dist[cls] = cls_error_distribution
+    #     cls_error_distribution = binned_matches / binned_counts
+    #     err_dist[cls] = cls_error_distribution
 
-    return accs, f1_scores, err_dist
+    return accs, f1_scores
