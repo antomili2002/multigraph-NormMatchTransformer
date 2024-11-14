@@ -360,7 +360,6 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 #     cost_mask[batch, n_point:, :] = -1
                 #     cost_mask[batch, :, n_point:] = -1 # ?
                 eval_pred_points = 0
-                j_pred = 0
                 predictions_list = []
                 for i in range(B):
                     predictions_list.append([])

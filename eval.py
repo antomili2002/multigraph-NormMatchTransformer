@@ -8,7 +8,7 @@ from utils.config import cfg
 from utils.evaluation_metric import matching_accuracy, f1_score, get_pos_neg, make_perm_mat_pred, matching_accuracy_from_lists, get_pos_neg_from_lists
 
 
-def eval_model(model, dataloader, eval_epoch=None, verbose=True):
+def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
     print("Start evaluation...")
     since = time.time()
 
@@ -16,7 +16,8 @@ def eval_model(model, dataloader, eval_epoch=None, verbose=True):
 
     if eval_epoch is not None:
         model_path = str(Path(cfg.model_dir) / "params" / "{:04}".format(eval_epoch) / "params.pt")
-        print("Loading model parameters from {}".format(model_path))
+        if local_rank == 0:
+            print("Loading model parameters from {}".format(model_path))
         model.load_state_dict(torch.load(model_path))
 
     was_training = model.training
@@ -32,8 +33,9 @@ def eval_model(model, dataloader, eval_epoch=None, verbose=True):
     error_dist_dict = {}
 
     for i, cls in enumerate(classes):
-        if verbose:
-            print("Evaluating class {}: {}/{}".format(cls, i, len(classes)))
+        if local_rank == 0:
+            if verbose:
+                print("Evaluating class {}: {}/{}".format(cls, i, len(classes)))
 
         running_since = time.time()
         iter_num = 0
@@ -81,18 +83,25 @@ def eval_model(model, dataloader, eval_epoch=None, verbose=True):
                     cost_mask[batch, n_point:, :] = -1
                     cost_mask[batch, :, n_point:] = -1
                 
+                eval_pred_points = 0
+                j_pred = 0
+                predictions_list = []
+                for i in range(B):
+                    predictions_list.append([])
                 for np in range(N_t):
-
+                    
+                    print()
+                    model(data_list, points_gt, edges, n_points_gt,  perm_mat_list, n_points_sample, eval_pred_points, in_training= False)
                     # model prediction
-                    s_pred_list = model(
-                        data_list,
-                        points_gt,
-                        edges,
-                        n_points_gt,
-                        n_points_sample,
-                        perm_mat_dec_list,
-                        in_training= False
-                    )
+                    # s_pred_list = model(
+                    #     data_list,
+                    #     points_gt,
+                    #     edges,
+                    #     n_points_gt,
+                    #     n_points_sample,
+                    #     perm_mat_dec_list,
+                    #     in_training= False
+                    # )
                     scores = s_pred_list.view(B, N_s, N_t)
                     
                     #apply matched mask to matching scores
