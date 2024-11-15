@@ -1,7 +1,7 @@
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
-# import wandb
+import wandb
 
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -174,7 +174,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
     if cfg.evaluate_only:
         assert resume
         print(f"Evaluating without training...")
-        accs, f1_scores, err_dict = eval.eval_model(model, dataloader["test"], eval_epoch=2)
+        accs, f1_scores = eval.eval_model(model, dataloader["test"], eval_epoch=2)
         acc_dict = {
             "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.classes, accs)
         }
@@ -192,7 +192,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 time_elapsed // 3600, (time_elapsed // 60) % 60, time_elapsed % 60
             )
         )
-        err_dist_df = pd.DataFrame(err_dict)
+        
         return model, acc_dict
 
     _, lr_milestones, lr_decay = lr_schedules[cfg.TRAIN.lr_schedule]
@@ -278,7 +278,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 num_points1 = model_output.size()[1]
                 total_loss = 0
                 total_cosine_similarities = []
-                #****************************************************************
+                
                 for b in range(batch_size):
                     batch_loss = 0
                     batch_cosine_similarities = []
@@ -333,17 +333,9 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
             with torch.no_grad():
                 matchings = []
                 B, N_s, N_t = perm_mat_list[0].size()
-                # print(perm_mat_list[0].size(), perm_mat_list[0])
+                
                 n_points_sample = torch.zeros(B, dtype=torch.int).to(device)
-                # perm_mat_dec_list = [torch.zeros(B, N_s, N_t, dtype=torch.int).to(device)]
-                # cost_mask = torch.ones(B, N_s, N_t, dtype=torch.int).to(device)
-                # batch_idx = torch.arange(cfg.BATCH_SIZE)
-
-                # set matching score for padded to zero
-                # for batch in batch_idx:
-                #     n_point = n_points_gt_list[0][batch]
-                #     cost_mask[batch, n_point:, :] = -1
-                #     cost_mask[batch, :, n_point:] = -1 # ?
+                
                 eval_pred_points = 0
                 j_pred = 0
                 predictions_list = []
@@ -367,12 +359,10 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                     eval_pred_points +=1
                 prediction_tensor = torch.tensor(predictions_list).to(perm_mat_list[0].device)
                 y_values_matching = torch.argmax(perm_mat_list[0], dim=-1)
+                
                 batch_correct, batch_total_valid = calculate_correct_and_valid(prediction_tensor, y_values_matching)
                 f1_score_ = calculate_f1_score(prediction_tensor, y_values_matching)
-                # print(prediction_tensor)
-                # print(y_values_matching)
-                # print("------------------")
-                # print(batch_correct, batch_total_valid)
+                
                 epoch_correct += batch_correct
                 epoch_total_valid += batch_total_valid
                 
@@ -394,24 +384,28 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         
         epoch_f1 = epoch_f1 / dataset_size
         if local_rank == 0:
+            wandb.log({"ep_loss": epoch_loss, "ep_acc": epoch_acc, "ep_f1": epoch_f1})
             print(f'epoch loss: {epoch_loss}, epoch accuracy: {epoch_acc}, epoch f1_score: {epoch_f1}')
-            
+        
+        if (epoch+1) % cfg.STATISTIC_STEP == 0:
+            if local_rank == 0:
+                accs, f1_scores = eval.eval_model(model, dataloader["test"], local_rank)
+                wandb.log({"mean test_acc": torch.mean(accs), "mean test_f1": torch.mean(f1_scores)})
+        
+        if cfg.save_checkpoint:
+            base_path = Path(checkpoint_path / "{:04}".format(epoch + 1))
+            Path(base_path).mkdir(parents=True, exist_ok=True)
+            path = str(base_path / "params.pt")
+            torch.save(model.state_dict(), path)
+            torch.save(optimizer.state_dict(), str(base_path / "optim.pt"))
             
         scheduler.step()
         
         
-        if (epoch+1) % cfg.STATISTIC_STEP == 0:
-            if local_rank == 0:
-                _, _ = eval.eval_model(model, dataloader["test"], local_rank)
+        
 
     
-    # time_elapsed = time.time() - since
-    # print(
-    #     "Training complete in {:.0f}h {:.0f}m {:.0f}s".format(
-    #         time_elapsed // 3600, (time_elapsed // 60) % 60, time_elapsed % 60
-    #     )
-    # )
-
+    
     return model, acc_dict
 
 
@@ -433,20 +427,20 @@ if __name__ == "__main__":
         json.dump(cfg, f)
     
     
-    # wandb.init(
-    # # set the wandb project where this run will be logged
-    # project="matchAR",
+    wandb.init(
+    # set the wandb project where this run will be logged
+    project="matchAR",
     
-    # # track hyperparameters and run metadata
-    # config={
-    # "learning_rate": cfg.TRAIN.LR,
-    # "architecture": cfg.MODEL_ARCH,
-    # "dataset": cfg.DATASET_NAME,
-    # "epochs": lr_schedules[cfg.TRAIN.lr_schedule][0],
-    # "batch_size": cfg.BATCH_SIZE,
-    # "cfg_full": cfg
-    # }
-    # )
+    # track hyperparameters and run metadata
+    config={
+    "learning_rate": cfg.TRAIN.LR,
+    "architecture": cfg.MODEL_ARCH,
+    "dataset": cfg.DATASET_NAME,
+    "epochs": lr_schedules[cfg.TRAIN.lr_schedule][0],
+    "batch_size": cfg.BATCH_SIZE,
+    "cfg_full": cfg
+    }
+    )
 
     torch.manual_seed(cfg.RANDOM_SEED)
 
