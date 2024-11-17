@@ -1,148 +1,34 @@
 import torch
-import torch.nn.functional as F
-import numpy as np
 
-
-# tensor_rows = []
-
-# def split_tensor(tensor_1, tensor_2):
-#     result = []
-#     start_index = 0
-
-#     for length in tensor_2:
-#         end_index = start_index + length
-#         result.append(tensor_1[start_index:end_index])
-#         start_index = end_index
-
-#     return result
-
-# # Example usage
-# tensor_1 = torch.tensor([1, 3, 5, 6, 7, 4, 2, 5])
-# tensor_2 = torch.tensor([6, 2])
-# split_result = split_tensor(tensor_1, tensor_2)
-# print(split_result)
-tgt_padding_mask = torch.zeros((2,10), dtype=torch.bool)
-tgt_padding_mask[:,:1] = 1
-print(tgt_padding_mask)
-
-# b = []
-# for i in range(3):
-#     a = []
-#     b.append(a)
+def calculate_micro_f1_for_epoch(predicted_batches, actual_batches, num_classes):
+    # Initialize counters for the epoch
+    TP_epoch = torch.tensor(0, dtype=torch.int32)
+    FP_epoch = torch.tensor(0, dtype=torch.int32)
+    FN_epoch = torch.tensor(0, dtype=torch.int32)
     
-# print(len(b))
+    # Iterate over batches
+    for predicted, actual in zip(predicted_batches, actual_batches):
+        for c in range(num_classes):
+            # Accumulate TP, FP, FN across all batches for all classes
+            TP_epoch += torch.sum((predicted == c) & (actual == c))
+            FP_epoch += torch.sum((predicted == c) & (actual != c))
+            FN_epoch += torch.sum((predicted != c) & (actual == c))
+    
+    # Compute precision, recall, and F1 score (micro-averaged)
+    precision = TP_epoch / (TP_epoch + FP_epoch + 1e-8)  # Avoid division by zero
+    recall = TP_epoch / (TP_epoch + FN_epoch + 1e-8)
+    f1_score = 2 * (precision * recall) / (precision + recall + 1e-8)
+    
+    return f1_score.item(), precision.item(), recall.item()
 
-# k = torch.tensor([3, 3, 3, 3, 3, 3])
-# print(k.size()[0])
-# a = torch.tensor([[[1,1,1,1],
-#                   [1,1,1,1]]])
+# Example usage
+# Predicted and actual matchings (class representations) for batches
+predicted_batches = [torch.tensor([0, 2, 1, 2]), torch.tensor([1, 0, 2, 1])]
+actual_batches = [torch.tensor([0, 1, 1, 2]), torch.tensor([1, 0, 2, 2])]
 
-# b = torch.tensor([[[3,3,3,3],
-#                   [3,3,3,3],
-#                   [3,3,3,3],
-#                   [3,3,3,3],
-#                   [3,3,3,3]]])
+num_classes = 3  # Number of unique matchings/classes
+f1_score, precision, recall = calculate_micro_f1_for_epoch(predicted_batches, actual_batches, num_classes)
 
-
-# print(a.size(), a)
-# print(b.size(), b)
-
-# b[0,3:5,:] = a[0]
-# print(b.size(), b)
-# myTensor = torch.rand((2,16,5))
-# l = 5
-# myTensor[0,l:,:] = 0
-# print(myTensor)
-
-# loss = torch.nn.BCEWithLogitsLoss()
-# input = torch.randn(3, requires_grad=True)
-# print(input.size(), input)
-# target = torch.empty(3).random_(2)
-# print(target.size(), target)
-# output = loss(input, target)
-# print(output)
-# output.backward()
-torch.manual_seed(1)
-
-batch_size = 1
-num_points1 = 1  # number of points in input1 per batch
-num_points2 = 2  # number of points in input2 per batch
-feature_dim = 5
-
-input1 = torch.randn(num_points1, feature_dim, requires_grad=True)
-input2 = torch.randn(num_points2, feature_dim, requires_grad=True)
-target = torch.tensor([[[1, -1, -1], [-1, 1, -1]]] * batch_size)
-
-print(input1)
-print(input2)
-co_sim = F.cosine_similarity(input1, input2)
-print(co_sim)
-
-print(input2[0].unsqueeze(0))
-co1 = F.cosine_similarity(input1[0].unsqueeze(0), input2[0].unsqueeze(0))
-print(co1)
-co2 = F.cosine_similarity(input1[0].unsqueeze(0), input2[1].unsqueeze(0))
-print(co2)
-# Initialize total loss
-# total_loss = 0
-
-
-# for b in range(batch_size):
-#     batch_loss = 0
-#     for i in range(num_points1):
-#         # Compute cosine similarity of input1[b, i] with all points in input2[b]
-#         cosine_similarities = F.cosine_similarity(input1[b, i].unsqueeze(0), input2[b])
-        
-#         # Apply target for this specific input1[b, i] row
-#         losses = torch.where(target[b, i] == 1, 1 - cosine_similarities, torch.clamp(cosine_similarities, min=0))
-        
-#         # Accumulate the mean loss for this input1[b, i] with all points in input2[b]
-#         batch_loss += losses.mean()
-        
-#     # Average loss across all points in input1 for the batch and accumulate
-#     total_loss += batch_loss / num_points1
-
-# # Average loss across the entire batch
-# final_loss = total_loss / batch_size
-# final_loss.backward()
-# print("Custom Cosine Embedding Loss with batch dimension:", final_loss.item())
-
-# Backward pass
-
-# Backward pass
-
-
-
-# o1 = F.cosine_similarity(input1[0], input2[0], dim=0).item()
-# o1 = 1 - o1
-# # print(o1)
-
-# o2 = F.cosine_similarity(input1[0], input2[1], dim=0).item()
-# o2 = max(0, o2)
-# # print(o2)
-
-# o3 = F.cosine_similarity(input1[0], input2[2], dim=0).item()
-# o3 = max(0, o3)
-# # print(o2)
-
-# o1_2 = F.cosine_similarity(input1[1], input2[0], dim=0).item()
-# o1_2 = max(0, o1_2)
-# # print(o1_2)
-
-# o2_2 = F.cosine_similarity(input1[1], input2[1], dim=0).item()
-# o2_2 = 1 - o2_2
-# # print(o2_2)
-
-# o3_2 = F.cosine_similarity(input1[1], input2[2], dim=0).item()
-# o3_2 = max(0, o3_2)
-# # print(o3_2)
-
-
-# p1 = np.mean([o1,o2,o3])
-# p2 = np.mean([o1_2,o2_2,o3_2])
-
-# print(p1)
-# print(p2)
-# print((p1+p2)/2)
-
-# print((1 - torch.triu(torch.ones((1, 5, 10)), diagonal=1)).bool())
+print("Micro-Averaged F1 Score:", f1_score)
+print("Micro-Averaged Precision:", precision)
+print("Micro-Averaged Recall:", recall)

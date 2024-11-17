@@ -1,5 +1,4 @@
 import torch
-from sklearn.metrics import f1_score
 
 def make_perm_mat_pred(matching_vec, num_nodes_t):
 
@@ -84,12 +83,37 @@ def calculate_f1_score(prediction_tensor, y_values_matching):
     valid_labels = y_values_matching[valid_mask]
     
 
-    valid_preds = valid_preds.cpu().numpy()
-    valid_labels = valid_labels.cpu().numpy()
+    # valid_preds = valid_preds.cpu().numpy()
+    # valid_labels = valid_labels.cpu().numpy()
     
-    f1_score_ = f1_score(valid_labels, valid_preds, average='micro')
+    # f1_score_ = f1_score(valid_labels, valid_preds, average='micro')
+    
+    num_classes = torch.max(torch.cat([valid_preds, valid_labels])) + 1
 
-    return f1_score_
+    TP_epoch = torch.zeros(num_classes, dtype=torch.int32).to(valid_preds.device)
+    FP_epoch = torch.zeros(num_classes, dtype=torch.int32).to(valid_preds.device)
+    FN_epoch = torch.zeros(num_classes, dtype=torch.int32).to(valid_preds.device)
+    
+    # Iterate through batches
+    
+    for c in range(num_classes):
+        TP_epoch[c] += torch.sum((valid_preds == c) & (valid_labels == c))
+        FP_epoch[c] += torch.sum((valid_preds == c) & (valid_labels != c))
+        FN_epoch[c] += torch.sum((valid_preds != c) & (valid_labels == c))
+    
+    # Compute global TP, FP, FN
+    TP_global = TP_epoch.sum()
+    FP_global = FP_epoch.sum()
+    FN_global = FN_epoch.sum()
+    
+    # Global precision and recall
+    precision_global = TP_global / (TP_global + FP_global + 1e-8)
+    recall_global = TP_global / (TP_global + FN_global + 1e-8)
+    
+    # Global F1 score
+    f1_global = 2 * (precision_global * recall_global) / (precision_global + recall_global + 1e-8)
+    
+    return TP_global, FP_global, FN_global
 
 
 def get_pos_neg(pmat_pred, pmat_gt):

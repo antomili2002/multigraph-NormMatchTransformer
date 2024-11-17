@@ -110,9 +110,10 @@ class MatchARNet(utils.backbone.VGG16_bn):
         self.tf_encoder = nn.TransformerEncoder(self.tf_encoder_layer, num_layers=cfg.Matching_TF.n_encoder)
         self.tf_decoder = nn.TransformerDecoder(self.tf_decoder_layer, num_layers=cfg.Matching_TF.n_decoder)
         
-        
-        self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, batch_norm=True)
-        self.mlp_out_2 = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, batch_norm=False)
+        self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, l2_scaling=True)
+        self.mlp_out_2 = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, l2_scaling=True)
+        # self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, batch_norm=False)
+        # self.mlp_out_2 = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, batch_norm=False)
         self.global_state_dim = 1024
 
         # matched encoding
@@ -254,7 +255,7 @@ class MatchARNet(utils.backbone.VGG16_bn):
         # if eval_pred_points is not None:
         #     source_points[:,eval_pred_points+1:,:] = 0
         decoder_output = self.tf_decoder(tgt=source_points,
-                                          memory=target_points, # encoder_output
+                                          memory=encoder_output, # encoder_output
                                           tgt_mask=source_points_mask) # TODO: tgt_key_padding_mask=query_mask ?
         
         #TODO: test if with MLP and batchnorm or not / leave out mlp
@@ -268,30 +269,51 @@ class MatchARNet(utils.backbone.VGG16_bn):
 
     
 
-
 class MLP(nn.Module):
-    def __init__(self, h_sizes, out_size, batch_norm):
+    def __init__(self, h_sizes, out_size, l2_scaling):
         super(MLP, self).__init__()
         self.hidden = nn.ModuleList()
-        self.bn_layers = nn.ModuleList()
-        self.batch_norm = batch_norm
-        for k in range(len(h_sizes)-1):
-            self.hidden.append(nn.Linear(h_sizes[k], h_sizes[k+1]))
-            if batch_norm:
-                self.bn_layers.append(nn.BatchNorm1d(h_sizes[k+1]))
+        self.l2_scaling = l2_scaling
+        for k in range(len(h_sizes) - 1):
+            self.hidden.append(nn.Linear(h_sizes[k], h_sizes[k + 1]))
         self.out = nn.Linear(h_sizes[-1], out_size)
-    
-    def forward(self, x):
 
+    def forward(self, x):
         # Feedforward
-        for i in range(len(self.hidden)):
-            if self.batch_norm:
-                x = torch.transpose(self.bn_layers[i](torch.transpose(self.hidden[i](x),1,2)),1,2)
-            else:
-                    x = self.hidden[i](x)
-            x = nn.functional.relu(x)
+        for layer in self.hidden:
+            x = layer(x)
+            if self.l2_scaling:
+                # Apply L2 normalization along the feature dimension
+                x = F.normalize(x, p=2, dim=-1)
+            x = F.relu(x)
         output = self.out(x)
+        # if self.l2_scaling:
+        #     # Apply L2 normalization to the final layer output
+        #     output = F.normalize(output, p=2, dim=-1)
         return output
+# class MLP(nn.Module):
+#     def __init__(self, h_sizes, out_size, batch_norm):
+#         super(MLP, self).__init__()
+#         self.hidden = nn.ModuleList()
+#         self.bn_layers = nn.ModuleList()
+#         self.batch_norm = batch_norm
+#         for k in range(len(h_sizes)-1):
+#             self.hidden.append(nn.Linear(h_sizes[k], h_sizes[k+1]))
+#             if batch_norm:
+#                 self.bn_layers.append(nn.BatchNorm1d(h_sizes[k+1]))
+#         self.out = nn.Linear(h_sizes[-1], out_size)
+    
+#     def forward(self, x):
+
+#         # Feedforward
+#         for i in range(len(self.hidden)):
+#             if self.batch_norm:
+#                 x = torch.transpose(self.bn_layers[i](torch.transpose(self.hidden[i](x),1,2)),1,2)
+#             else:
+#                     x = self.hidden[i](x)
+#             x = nn.functional.relu(x)
+#         output = self.out(x)
+#         return output
 
 class MLPQuery(nn.Module):
     def __init__(self, node_dim, hidden_size, hidden_out, batch_norm):

@@ -43,13 +43,16 @@ def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
         ds.set_cls(cls)
         acc_match_num = torch.zeros(1, device=device)
         acc_total_num = torch.zeros(1, device=device)
-        tp = torch.zeros(1, device=device)
-        fp = torch.zeros(1, device=device)
-        fn = torch.zeros(1, device=device)
+        # tp = torch.zeros(1, device=device)
+        # fp = torch.zeros(1, device=device)
+        # fn = torch.zeros(1, device=device)
 
         # for analysis of each step accuracy
         error_dist_dict[cls] = []
 
+        tp = 0
+        fp = 0
+        fn = 0
         epoch_f1 = 0.0
         epoch_correct = 0
         epoch_total_valid = 0
@@ -89,7 +92,7 @@ def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
                 eval_pred_points = 0
                 j_pred = 0
                 predictions_list = []
-                for i in range(B):
+                for _ in range(B):
                     predictions_list.append([])
                     
                 for np in range(N_t):
@@ -111,32 +114,18 @@ def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
                 prediction_tensor = torch.tensor(predictions_list).to(perm_mat_list[0].device)
                 y_values_matching = torch.argmax(perm_mat_list[0], dim=-1)
                 batch_correct, batch_total_valid = calculate_correct_and_valid(prediction_tensor, y_values_matching)
-                f1_score_ = calculate_f1_score(prediction_tensor, y_values_matching)
+                
+                _tp, _fp, _fn = calculate_f1_score(prediction_tensor, y_values_matching)
+
                 
                 epoch_correct += batch_correct
                 epoch_total_valid += batch_total_valid
-                # matched_instance_indicator = torch.stack(matched_instances_at_step, dim=1)
-                # for example in range(len(matched_instance_indicator)):
-                #     n_point= n_points_gt[0][example]
-                #     error_dist_dict[cls].append(matched_instance_indicator[example, :n_point].long())
-                    
-                
-                # matchings = torch.stack(matchings, dim=2)
-
-                # matches_list = []
-                # s_pred_mat_list = []
-                # perm_mat_gt_list = []
-                # for batch in batch_idx:
-                #     n_point = n_points_gt[0][batch]
-                #     matched_idxes  = matchings[batch,:, :n_point]
-                #     matches_list.append(matched_idxes)
-                #     s_pred_mat = torch.zeros(n_point, n_point).to(perm_mat_list[0].device)
-                #     s_pred_mat[matched_idxes[0,:], matched_idxes[1,:]] = 1
-                #     s_pred_mat_list.append(s_pred_mat)
-                #     perm_mat_gt_list.append(perm_mat_list[0][batch,:n_point, :n_point])
+                tp += _tp
+                fp += _fp
+                fn += _fn
             
             bs = perm_mat_list[0].size(0)
-            epoch_f1 += f1_score_ * bs  
+            
             # evaluation metrics
             # _, _acc_match_num, _acc_total_num = matching_accuracy_from_lists(s_pred_mat_list, perm_mat_gt_list)
             # _tp, _fp, _fn = get_pos_neg_from_lists(s_pred_mat_list, perm_mat_gt_list)
@@ -160,7 +149,11 @@ def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
         else:
             epoch_acc = 0.0
 
-        epoch_f1 = epoch_f1 / dataset_size
+        precision_global = tp / (tp + fp + 1e-8)
+        recall_global = tp / (tp + fn + 1e-8)
+        
+        # Global F1 score
+        epoch_f1 = 2 * (precision_global * recall_global) / (precision_global + recall_global + 1e-8)
         
         accs[i] = epoch_acc
         f1_scores[i] = epoch_f1

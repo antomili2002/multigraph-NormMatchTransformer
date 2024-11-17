@@ -37,7 +37,8 @@ class HammingLoss(torch.nn.Module):
 
 lr_schedules = {
     #TODO: CHANGE BACK TO 10
-    "long_halving": (30, (2, 4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
+    # "long_halving": (30, (2, 4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
+    "long_halving": (30, (6, 16, 26), 0.1),
     # "long_halving": (30, (3, 6, 12, 26), 0.25),
     # "long_halving": (50, (40,), 0.1),
     "short_halving": (2, (1,), 0.5),
@@ -222,6 +223,10 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
 
         # print(len(dataloader["train"]))
         # Iterate over data.
+        tp = 0
+        fp = 0
+        fn = 0
+        
         epoch_correct = 0
         epoch_total_valid = 0
         modeL_parameter_list = list(model.parameters())
@@ -361,10 +366,13 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 y_values_matching = torch.argmax(perm_mat_list[0], dim=-1)
                 
                 batch_correct, batch_total_valid = calculate_correct_and_valid(prediction_tensor, y_values_matching)
-                f1_score_ = calculate_f1_score(prediction_tensor, y_values_matching)
+                _tp, _fp, _fn = calculate_f1_score(prediction_tensor, y_values_matching)
                 
                 epoch_correct += batch_correct
                 epoch_total_valid += batch_total_valid
+                tp += _tp
+                fp += _fp
+                fn += _fn
                 
                 
                 
@@ -372,8 +380,13 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 
             bs = perm_mat_list[0].size(0)
             epoch_loss += loss.item() * bs
-            epoch_f1 += f1_score_ * bs
-            
+           
+        precision_global = tp / (tp + fp + 1e-8)
+        recall_global = tp / (tp + fn + 1e-8)
+        
+        # Global F1 score
+        epoch_f1 = 2 * (precision_global * recall_global) / (precision_global + recall_global + 1e-8)
+        
         if epoch_total_valid > 0:
             epoch_acc = epoch_correct / epoch_total_valid
         else:
@@ -382,7 +395,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         
         epoch_loss = epoch_loss / dataset_size
         
-        epoch_f1 = epoch_f1 / dataset_size
+        
         if local_rank == 0:
             wandb.log({"ep_loss": epoch_loss, "ep_acc": epoch_acc, "ep_f1": epoch_f1})
             print(f'epoch loss: {epoch_loss}, epoch accuracy: {epoch_acc}, epoch f1_score: {epoch_f1}')
@@ -406,7 +419,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
 
     
     
-    return model, acc_dict
+    return model
 
 
 if __name__ == "__main__":
@@ -419,6 +432,8 @@ if __name__ == "__main__":
     #linux
     # dist.init_process_group(backend='nccl', init_method='env://')
     
+    local_rank = int(os.environ['LOCAL_RANK']) 
+    
     import json
     import os
 
@@ -426,21 +441,21 @@ if __name__ == "__main__":
     with open(os.path.join(cfg.model_dir, "settings.json"), "w") as f:
         json.dump(cfg, f)
     
-    
-    wandb.init(
-    # set the wandb project where this run will be logged
-    project="matchAR",
-    
-    # track hyperparameters and run metadata
-    config={
-    "learning_rate": cfg.TRAIN.LR,
-    "architecture": cfg.MODEL_ARCH,
-    "dataset": cfg.DATASET_NAME,
-    "epochs": lr_schedules[cfg.TRAIN.lr_schedule][0],
-    "batch_size": cfg.BATCH_SIZE,
-    "cfg_full": cfg
-    }
-    )
+    if local_rank == 0:
+        wandb.init(
+        # set the wandb project where this run will be logged
+        project="matchAR",
+        
+        # track hyperparameters and run metadata
+        config={
+        "learning_rate": cfg.TRAIN.LR,
+        "architecture": cfg.MODEL_ARCH,
+        "dataset": cfg.DATASET_NAME,
+        "epochs": lr_schedules[cfg.TRAIN.lr_schedule][0],
+        "batch_size": cfg.BATCH_SIZE,
+        "cfg_full": cfg
+        }
+        )
 
     torch.manual_seed(cfg.RANDOM_SEED)
 
@@ -471,7 +486,7 @@ if __name__ == "__main__":
         model = MatchARNet()
     
     
-    local_rank = int(os.environ['LOCAL_RANK']) 
+    
     torch.cuda.set_device(local_rank)
     device = torch.device(f'cuda:{local_rank}')
     
@@ -495,7 +510,7 @@ if __name__ == "__main__":
         dict(params=backbone_params, lr=cfg.TRAIN.LR * 0.01),
         dict(params=new_params, lr=cfg.TRAIN.LR),
     ]
-    optimizer = optim.RAdam(opt_params) #, weight_decay=1e-5
+    optimizer = optim.RAdam(opt_params, weight_decay=1e-5) #, weight_decay=1e-5
     # optimizer = optim.Adam(opt_params, weight_decay=1e-5)
 
     if not Path(cfg.model_dir).exists():
