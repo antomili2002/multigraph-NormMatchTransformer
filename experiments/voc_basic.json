@@ -1,9 +1,9 @@
 {
-  "BATCH_SIZE": 10,
+  "BATCH_SIZE": 2,
   "DATASET_NAME": "PascalVOC",
   "exclude_willow_classes": false,
   "EVAL": {
-    "SAMPLES": 1000,
+    "SAMPLES": 10,
     "num_graphs_in_matching_instance": 2
   },
   "SPLINE_CNN": {
@@ -11,9 +11,9 @@
     "output_features": 256
   },
   "Matching_TF": {
-    "n_head": 4,
+    "n_head": 8,
     "n_encoder": 6,
-    "n_decoder": 4,
+    "n_decoder": 6,
     "d_model": 512,
     "activation": "relu",
     "batch_norm": true,
@@ -27,15 +27,15 @@
   "RANDOM_SEED": 123,
   "warmstart_path": null,
   "TRAIN": {
-    "EPOCH_ITERS": 2000,
+    "EPOCH_ITERS": 10,
     "LR": 0.0002,
     "lr_schedule": "long_halving",
-    "clip_norm": 0,
+    "clip_norm": 1,
     "num_graphs_in_matching_instance": 2,
     "random_swap": false,
     "AR": true
   },
-  "STATISTIC_STEP": 10,
+  "STATISTIC_STEP": 1,
   "TRACK_GRAD_NORM": false,
   "visualize": false,
   "visualization_params": {

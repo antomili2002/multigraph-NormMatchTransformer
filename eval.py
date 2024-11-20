@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 
 from utils.config import cfg
-from utils.evaluation_metric import calculate_correct_and_valid, calculate_f1_score
+from utils.evaluation_metric import calculate_correct_and_valid, calculate_f1_score, get_pos_neg
 
 def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
     print("Start evaluation...")
@@ -31,6 +31,7 @@ def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
     accs = torch.zeros(len(classes), device=device)
     f1_scores = torch.zeros(len(classes), device=device)
     error_dist_dict = {}
+    
 
     for i, cls in enumerate(classes):
         if local_rank == 0:
@@ -40,6 +41,7 @@ def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
         running_since = time.time()
         iter_num = 0
 
+        
         ds.set_cls(cls)
         acc_match_num = torch.zeros(1, device=device)
         acc_total_num = torch.zeros(1, device=device)
@@ -48,8 +50,8 @@ def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
         # fn = torch.zeros(1, device=device)
 
         # for analysis of each step accuracy
-        error_dist_dict[cls] = []
-
+        
+        result_dict = {}
         tp = 0
         fp = 0
         fn = 0
@@ -115,6 +117,16 @@ def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
                 y_values_matching = torch.argmax(perm_mat_list[0], dim=-1)
                 batch_correct, batch_total_valid = calculate_correct_and_valid(prediction_tensor, y_values_matching)
                 
+                
+                
+                error_list = (prediction_tensor != y_values_matching).int()
+            
+                for idx, e in enumerate(n_points_gt[0]):
+                    if e.item() not in result_dict:
+                        result_dict[e.item()] = [1, error_list[idx,:e.item()]]
+                    result_dict[e.item()][0] += 1
+                    result_dict[e.item()][1] += error_list[idx,:e.item()]
+                # Iterate through the batch
                 _tp, _fp, _fn = calculate_f1_score(prediction_tensor, y_values_matching)
 
                 
@@ -159,8 +171,10 @@ def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
         f1_scores[i] = epoch_f1
         if verbose:
             print("Class {} acc = {:.4f} F1 = {:.4f}".format(cls, accs[i], f1_scores[i]))
+            
+        error_dist_dict[cls] = result_dict
         
-
+    print(error_dist_dict)
     time_elapsed = time.time() - since
     print("Evaluation complete in {:.0f}m {:.0f}s".format(time_elapsed // 60, time_elapsed % 60))
 

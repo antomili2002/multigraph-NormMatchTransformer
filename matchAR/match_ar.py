@@ -243,12 +243,12 @@ class MatchARNet(utils.backbone.VGG16_bn):
         # print(source_points_mask.shape)
         # print(target_points.size(), target_points)
         # print(source_points.size(),source_points)
-        tgt_padding_mask = torch.ones((batch_size, seq_len)).to(source_points_mask.device)
+        tgt_padding_mask = torch.zeros((batch_size, seq_len), dtype=torch.bool).to(source_points_mask.device)
         if eval_pred_points is not None:
-            tgt_padding_mask = torch.zeros((batch_size, seq_len), dtype=torch.bool).to(source_points_mask.device)
+            tgt_padding_mask = torch.ones((batch_size, seq_len), dtype=torch.bool).to(source_points_mask.device)
             for i in range(batch_size):
                 if eval_pred_points < n_points[0][i]:
-                    tgt_padding_mask[i,:eval_pred_points+1] = 1
+                    tgt_padding_mask[i,:eval_pred_points+1] = 0
                     
 
                 
@@ -256,7 +256,8 @@ class MatchARNet(utils.backbone.VGG16_bn):
         #     source_points[:,eval_pred_points+1:,:] = 0
         decoder_output = self.tf_decoder(tgt=source_points,
                                           memory=encoder_output, # encoder_output
-                                          tgt_mask=source_points_mask) # TODO: tgt_key_padding_mask=query_mask ?
+                                          tgt_mask=source_points_mask,
+                                          tgt_key_padding_mask=tgt_padding_mask) # TODO: tgt_key_padding_mask=query_mask ?
         
         #TODO: test if with MLP and batchnorm or not / leave out mlp
         # print(decoder_output)

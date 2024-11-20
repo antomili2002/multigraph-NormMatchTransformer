@@ -51,21 +51,21 @@ def make_sampled_perm_mat_pred(matching_vec, n_sampled_list):
 #     return torch.stack(perm_mat_pred)
 
 
-# def f1_score(tp, fp, fn):
-#     """
-#     F1 score (harmonic mix of precision and recall) between predicted permutation matrix and ground truth permutation matrix.
-#     :param tp: number of true positives
-#     :param fp: number of false positives
-#     :param fn: number of false negatives
-#     :return: F1 score
-#     """
-#     device = tp.device
+def f1_score(tp, fp, fn):
+    """
+    F1 score (harmonic mix of precision and recall) between predicted permutation matrix and ground truth permutation matrix.
+    :param tp: number of true positives
+    :param fp: number of false positives
+    :param fn: number of false negatives
+    :return: F1 score
+    """
+    device = tp.device
 
-#     const = torch.tensor(1e-7, device=device)
-#     precision = tp / (tp + fp + const)
-#     recall = tp / (tp + fn + const)
-#     f1 = 2 * precision * recall / (precision + recall + const)
-#     return f1
+    const = torch.tensor(1e-7, device=device)
+    precision = tp / (tp + fp + const)
+    recall = tp / (tp + fn + const)
+    f1 = 2 * precision * recall / (precision + recall + const)
+    return f1
 
 
 def calculate_correct_and_valid(prediction_tensor, y_values_matching):
@@ -82,7 +82,11 @@ def calculate_f1_score(prediction_tensor, y_values_matching):
     valid_preds = prediction_tensor[valid_mask]
     valid_labels = y_values_matching[valid_mask]
     
-
+    # print(prediction_tensor)
+    # print(y_values_matching)
+    # print(valid_preds)
+    # print(valid_labels)
+    # br
     # valid_preds = valid_preds.cpu().numpy()
     # valid_labels = valid_labels.cpu().numpy()
     

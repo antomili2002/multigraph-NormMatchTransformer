@@ -24,7 +24,7 @@ import eval
 from matchAR import Net, SimpleNet, EncoderNet, ResMatcherNet, MatchARNet
 from utils.config import cfg
 from utils.utils import update_params_from_cmdline, compute_grad_norm
-from utils.evaluation_metric import calculate_correct_and_valid, calculate_f1_score
+from utils.evaluation_metric import calculate_correct_and_valid, calculate_f1_score, get_pos_neg, get_pos_neg_from_lists
 
 
 
@@ -201,7 +201,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         optimizer, milestones=lr_milestones, gamma=lr_decay
     )
     
-    
+    result_dict = {}
     for epoch in range(start_epoch, num_epochs):
         if local_rank == 0:
             print("Epoch {}/{}".format(epoch, num_epochs - 1))
@@ -298,9 +298,15 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 expanded_mask = has_one.unsqueeze(-1).expand_as(perm_mat_list[0])
                 similarity_scores = similarity_scores.masked_select(expanded_mask).view(-1, perm_mat_list[0].size(2))
                 y_values = perm_mat_list[0].masked_select(expanded_mask).view(-1, perm_mat_list[0].size(2))
+                y_values_ = torch.argmax(y_values, dim=1)
+                loss = criterion(similarity_scores, y_values_)
                 
-                loss = criterion(similarity_scores, y_values)
                 
+                # pred_index = torch.argmax(F.softmax(similarity_scores), dim=1)
+                # pred_mat = torch.zeros_like(y_values)
+                
+                # for k in range(len(pred_index)):
+                #     pred_mat[k,pred_index[k]] = 1
                 # loss /= y_values.shape[0]
 
                 # backward + optimize
@@ -365,14 +371,35 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 prediction_tensor = torch.tensor(predictions_list).to(perm_mat_list[0].device)
                 y_values_matching = torch.argmax(perm_mat_list[0], dim=-1)
                 
-                batch_correct, batch_total_valid = calculate_correct_and_valid(prediction_tensor, y_values_matching)
-                _tp, _fp, _fn = calculate_f1_score(prediction_tensor, y_values_matching)
+                error_list = (prediction_tensor != y_values_matching).int()
+            
+                for idx, e in enumerate(n_points_gt_list[0]):
+                    if e.item() not in result_dict:
+                        result_dict[e.item()] = [1, error_list[idx,:e.item()]]
+                    result_dict[e.item()][0] += 1
+                    result_dict[e.item()][1] += error_list[idx,:e.item()]
                 
+                
+                has_one = perm_mat_list[0].sum(dim=2) != 0
+                expanded_mask = has_one.unsqueeze(-1).expand_as(perm_mat_list[0])
+                y_values = perm_mat_list[0].masked_select(expanded_mask).view(-1, perm_mat_list[0].size(2))
+                valid_mask = (prediction_tensor != -1) & (y_values_matching != -1)
+                valid_labels = prediction_tensor[valid_mask]
+                pred_mat = torch.zeros_like(y_values)
+                
+                for k in range(len(valid_labels)):
+                    pred_mat[k,valid_labels[k]] = 1
+                
+                batch_correct, batch_total_valid = calculate_correct_and_valid(prediction_tensor, y_values_matching)
+                # _tp, _fp, _fn = calculate_f1_score(prediction_tensor, y_values_matching)
+                _tp, _fp, _fn = get_pos_neg_from_lists(pred_mat, y_values)
                 epoch_correct += batch_correct
                 epoch_total_valid += batch_total_valid
                 tp += _tp
                 fp += _fp
                 fn += _fn
+                # print(tp, fp, fn)
+                # br
                 
                 
                 
@@ -395,7 +422,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         
         epoch_loss = epoch_loss / dataset_size
         
-        
+        print(result_dict)
         if local_rank == 0:
             wandb.log({"ep_loss": epoch_loss, "ep_acc": epoch_acc, "ep_f1": epoch_f1})
             print(f'epoch loss: {epoch_loss}, epoch accuracy: {epoch_acc}, epoch f1_score: {epoch_f1}')
