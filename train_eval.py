@@ -37,8 +37,9 @@ class HammingLoss(torch.nn.Module):
 
 lr_schedules = {
     #TODO: CHANGE BACK TO 10
-    "long_halving1": (32, (2, 4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
+    "long_halving1": (32, (4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
     "long_halving2": (40, (8, 22, 35), 0.1),
+    "long_halving3": (32, (6, 16, 28), 0.5),
     # "long_halving": (30, (3, 6, 12, 26), 0.25),
     # "long_halving": (50, (40,), 0.1),
     "short_halving": (2, (1,), 0.5),
@@ -163,6 +164,7 @@ def cosine_norm(x, dim=-1):
         # divide by the magnitude to place on the unit hypersphere
         return x / norm
 def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epochs, local_rank, resume=False, start_epoch=0):
+    
     since = time.time()
     dataloader["train"].dataset.set_num_graphs(cfg.TRAIN.num_graphs_in_matching_instance)
     dataset_size = len(dataloader["train"].dataset)
@@ -209,7 +211,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
             )
         )
         
-        return model, acc_dict
+        return model
 
     _, lr_milestones, lr_decay = lr_schedules[cfg.TRAIN.lr_schedule]
     scheduler = optim.lr_scheduler.MultiStepLR(
@@ -355,8 +357,17 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 # # print(loss.item())
                 # loss.backward()
                 ################################################################	
+                # if max_norm > 0:
+                #     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+                    
                 if max_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+                    for name, param in model.named_parameters():
+                        if "n_gpt_decoder" in name:  # Check if the parameter belongs to the excluded module
+                            continue
+                        elif param.grad is not None:
+                            torch.nn.utils.clip_grad_norm_(param, max_norm)# Skip excluded parameters
+                #TODO: Clip without Decoder layer
+            
                 optimizer.step()
 
                 model.module.n_gpt_decoder.enforce_constraints() 
@@ -475,10 +486,10 @@ if __name__ == "__main__":
     cfg = update_params_from_cmdline(default_params=cfg)
     
     #windows
-    dist.init_process_group(backend='gloo', init_method='env://')
+    # dist.init_process_group(backend='gloo', init_method='env://')
     
     #linux
-    # dist.init_process_group(backend='nccl', init_method='env://')
+    dist.init_process_group(backend='nccl', init_method='env://')
     
     local_rank = int(os.environ['LOCAL_RANK']) 
     
@@ -565,7 +576,7 @@ if __name__ == "__main__":
         Path(cfg.model_dir).mkdir(parents=True)
 
     num_epochs, _, __ = lr_schedules[cfg.TRAIN.lr_schedule]
-    model, accs = train_eval_model(model, 
+    model = train_eval_model(model, 
                                    criterion, 
                                    optimizer,
                                    dataloader,

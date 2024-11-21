@@ -30,7 +30,7 @@
     "EPOCH_ITERS": 10,
     "LR": 0.0002,
     "lr_schedule": "long_halving2",
-    "clip_norm": 0.1,
+    "clip_norm": 0,
     "weight_decay": 0,
     "num_graphs_in_matching_instance": 2,
     "random_swap": false,
