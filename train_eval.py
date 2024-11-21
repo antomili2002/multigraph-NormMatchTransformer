@@ -37,8 +37,8 @@ class HammingLoss(torch.nn.Module):
 
 lr_schedules = {
     #TODO: CHANGE BACK TO 10
-    # "long_halving": (30, (2, 4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
-    "long_halving": (30, (6, 16, 26), 0.1),
+    "long_halving1": (32, (2, 4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
+    "long_halving2": (40, (8, 22, 35), 0.1),
     # "long_halving": (30, (3, 6, 12, 26), 0.25),
     # "long_halving": (50, (40,), 0.1),
     "short_halving": (2, (1,), 0.5),
@@ -147,6 +147,21 @@ def split_tensor(tensor_1, tensor_2):
 
     return result
 
+
+def cosine_norm(x, dim=-1):
+        """
+        Places vectors onto the unit-hypersphere
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Normalized tensor.
+        """
+        # calculate the magnitude of the vectors
+        norm = torch.norm(x, p=2, dim=dim, keepdim=True).clamp(min=1e-6)
+        # divide by the magnitude to place on the unit hypersphere
+        return x / norm
 def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epochs, local_rank, resume=False, start_epoch=0):
     since = time.time()
     dataloader["train"].dataset.set_num_graphs(cfg.TRAIN.num_graphs_in_matching_instance)
@@ -200,7 +215,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
     scheduler = optim.lr_scheduler.MultiStepLR(
         optimizer, milestones=lr_milestones, gamma=lr_decay
     )
-    
+    torch.autograd.set_detect_anomaly(True)
+
     result_dict = {}
     for epoch in range(start_epoch, num_epochs):
         if local_rank == 0:
@@ -279,6 +295,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 
                 target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
                 
+                target_points = cosine_norm(target_points)
+                
                 batch_size = model_output.size()[0]
                 num_points1 = model_output.size()[1]
                 total_loss = 0
@@ -341,6 +359,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
                 optimizer.step()
 
+                model.module.n_gpt_decoder.enforce_constraints() 
+                
             with torch.no_grad():
                 matchings = []
                 B, N_s, N_t = perm_mat_list[0].size()
@@ -355,6 +375,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 for np in range(N_t):
                     
                     target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list,  perm_mat_list, n_points_sample, eval_pred_points, in_training= False)
+                    target_points = cosine_norm(target_points)
                     batch_size = model_output.size()[0]
                     num_points1 = model_output.size()[1]
                     for b in range(batch_size):
@@ -422,7 +443,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         
         epoch_loss = epoch_loss / dataset_size
         
-        print(result_dict)
+        # print(result_dict)
         if local_rank == 0:
             wandb.log({"ep_loss": epoch_loss, "ep_acc": epoch_acc, "ep_f1": epoch_f1})
             print(f'epoch loss: {epoch_loss}, epoch accuracy: {epoch_acc}, epoch f1_score: {epoch_f1}')
@@ -537,7 +558,7 @@ if __name__ == "__main__":
         dict(params=backbone_params, lr=cfg.TRAIN.LR * 0.01),
         dict(params=new_params, lr=cfg.TRAIN.LR),
     ]
-    optimizer = optim.RAdam(opt_params, weight_decay=1e-5) #, weight_decay=1e-5
+    optimizer = optim.RAdam(opt_params, weight_decay=cfg.TRAIN.weight_decay) #, weight_decay=1e-5
     # optimizer = optim.Adam(opt_params, weight_decay=1e-5)
 
     if not Path(cfg.model_dir).exists():

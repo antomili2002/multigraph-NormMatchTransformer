@@ -8,6 +8,20 @@ from scipy.optimize import linear_sum_assignment
 from utils.config import cfg
 from utils.evaluation_metric import calculate_correct_and_valid, calculate_f1_score, get_pos_neg
 
+def cosine_norm(x, dim=-1):
+        """
+        Places vectors onto the unit-hypersphere
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Normalized tensor.
+        """
+        # calculate the magnitude of the vectors
+        norm = torch.norm(x, p=2, dim=dim, keepdim=True).clamp(min=1e-6)
+        # divide by the magnitude to place on the unit hypersphere
+        return x / norm
 def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
     print("Start evaluation...")
     since = time.time()
@@ -100,6 +114,8 @@ def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
                 for np in range(N_t):
                     
                     target_points, model_output = model(data_list, points_gt, edges, n_points_gt,  perm_mat_list, n_points_sample, eval_pred_points, in_training= False)
+                    target_points = cosine_norm(target_points)
+                    
                     batch_size = model_output.size()[0]
                     num_points1 = model_output.size()[1]
                     for b in range(batch_size):
@@ -174,7 +190,7 @@ def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
             
         error_dist_dict[cls] = result_dict
         
-    print(error_dist_dict)
+    # print(error_dist_dict)
     time_elapsed = time.time() - since
     print("Evaluation complete in {:.0f}m {:.0f}s".format(time_elapsed // 60, time_elapsed % 60))
 

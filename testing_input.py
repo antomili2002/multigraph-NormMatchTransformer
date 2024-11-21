@@ -9,6 +9,37 @@ print(t1 + t2)
 l = torch.triu(torch.ones(10, 10, dtype=torch.bool))
 
 print(l)
+
+class ModelConfig:
+    """
+    Design your N-GPT here
+    """
+    dim: int = 128
+    device: str = None
+        # defaults to best available GPU/CPU
+    max_seq_len: int = 384 # 512 is the most my 8gb of ram can handle
+    theta: float = 10_000 # RoPE hyperparameter; 10_000 is the most common choice
+    vocab_len: int = 2048 # options are 512, 1024, 2048
+    num_layers: int = 8
+    num_heads: int = 4 # number of heads in the multi-head attention mechanism
+    mlp_hidden_mult: float = 4
+    
+    
+l = ModelConfig()
+print(l.device)
+l.device = 'cpu'
+print(l.device)
+
+
+
+k = torch.Tensor([1,2])
+
+
+l = k
+
+l[0] = 0
+
+print(k)
 # def calculate_micro_f1_for_epoch(predicted_batches, actual_batches, num_classes):
 #     # Initialize counters for the epoch
 #     TP_epoch = torch.tensor(0, dtype=torch.int32)

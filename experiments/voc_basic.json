@@ -1,5 +1,5 @@
 {
-  "BATCH_SIZE": 2,
+  "BATCH_SIZE": 12,
   "DATASET_NAME": "PascalVOC",
   "exclude_willow_classes": false,
   "EVAL": {
@@ -11,7 +11,7 @@
     "output_features": 256
   },
   "Matching_TF": {
-    "n_head": 8,
+    "n_head": 4,
     "n_encoder": 6,
     "n_decoder": 6,
     "d_model": 512,
@@ -29,13 +29,14 @@
   "TRAIN": {
     "EPOCH_ITERS": 10,
     "LR": 0.0002,
-    "lr_schedule": "long_halving",
-    "clip_norm": 1,
+    "lr_schedule": "long_halving2",
+    "clip_norm": 0.1,
+    "weight_decay": 0,
     "num_graphs_in_matching_instance": 2,
     "random_swap": false,
     "AR": true
   },
-  "STATISTIC_STEP": 1,
+  "STATISTIC_STEP": 10,
   "TRACK_GRAD_NORM": false,
   "visualize": false,
   "visualization_params": {

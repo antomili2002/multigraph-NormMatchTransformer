@@ -14,6 +14,7 @@ from utils.feature_align import feature_align
 from utils.utils import lexico_iter
 from utils.evaluation_metric import make_perm_mat_pred
 from utils.visualization import easy_visualize
+from matchAR.nGPT_decoder import NGPT_DECODER
 
 
 def normalize_over_channels(x):
@@ -84,7 +85,16 @@ def create_source_masks(source_points, n_points, max_length=40):
 
     return source_points_mask, source_key_padding_mask
 
-
+class ModelConfig:
+    """
+    Design your N-GPT here
+    """
+    dim: int = 128
+    device: str = None
+        # defaults to best available GPU/CPU
+    num_layers: int = 6
+    num_heads: int = 4 # number of heads in the multi-head attention mechanism
+    mlp_hidden_mult: float = 4
 
 class MatchARNet(utils.backbone.VGG16_bn):
     def __init__(self):
@@ -109,6 +119,13 @@ class MatchARNet(utils.backbone.VGG16_bn):
                                                            batch_first=True)
         self.tf_encoder = nn.TransformerEncoder(self.tf_encoder_layer, num_layers=cfg.Matching_TF.n_encoder)
         self.tf_decoder = nn.TransformerDecoder(self.tf_decoder_layer, num_layers=cfg.Matching_TF.n_decoder)
+        
+        nGPT_config = ModelConfig()
+        nGPT_config.dim = cfg.Matching_TF.d_model
+        nGPT_config.num_layers = cfg.Matching_TF.n_decoder
+        nGPT_config.num_heads = cfg.Matching_TF.n_head # number of heads in the multi-head attention mechanism
+        nGPT_config.mlp_hidden_mult  = 4
+        self.n_gpt_decoder = NGPT_DECODER(nGPT_config)
         
         self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, l2_scaling=True)
         self.mlp_out_2 = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, l2_scaling=True)
@@ -142,6 +159,8 @@ class MatchARNet(utils.backbone.VGG16_bn):
                 
                 
         return new_queries
+    
+    
 
     def forward(
         self,
@@ -250,21 +269,32 @@ class MatchARNet(utils.backbone.VGG16_bn):
                 if eval_pred_points < n_points[0][i]:
                     tgt_padding_mask[i,:eval_pred_points+1] = 0
                     
-
-                
+        
+        
+        dec_output = self.n_gpt_decoder(source_points, source_points_mask, target_points)
+        
+        # print(dec_output.shape, dec_output)
+        # br
         # if eval_pred_points is not None:
         #     source_points[:,eval_pred_points+1:,:] = 0
-        decoder_output = self.tf_decoder(tgt=source_points,
-                                          memory=encoder_output, # encoder_output
-                                          tgt_mask=source_points_mask,
-                                          tgt_key_padding_mask=tgt_padding_mask) # TODO: tgt_key_padding_mask=query_mask ?
+        
+        
+        # decoder_output = self.tf_decoder(tgt=source_points,
+        #                                   memory=encoder_output, # encoder_output
+        #                                   tgt_mask=source_points_mask,
+        #                                   tgt_key_padding_mask=tgt_padding_mask) # TODO: tgt_key_padding_mask=query_mask ?
+        
+        
         
         #TODO: test if with MLP and batchnorm or not / leave out mlp
         # print(decoder_output)
         # decoder_output = self.mlp_out(decoder_output)
         # target_points = self.mlp_out(target_points)
-    
-        return target_points, decoder_output
+        
+        # norm = torch.norm(target_points, p=2, dim=-1, keepdim=True).clamp(min=1e-6)
+        # target_points = self.cosine_norm(target_points)
+        # target_points /= norm
+        return target_points, dec_output
         
 
 

@@ -138,7 +138,7 @@ class SelfAttention(nn.Module):
 
     def forward(self,
         x: torch.Tensor,
-        freqs: dict = None,
+        # freqs: dict = None,
         mask: torch.Tensor = None
     ) -> torch.Tensor:
         """
@@ -164,10 +164,10 @@ class SelfAttention(nn.Module):
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim)
 
         # applying RoPE
-        sin = freqs['sin'][:, :seq_len, :, :].to(self.device) 
-        cos = freqs['cos'][:, :seq_len, :, :].to(self.device) # (1, seq_len, 1, head_dim // 2)
-        q = self.apply_rotary_pos_emb(q, sin, cos) # no shape change
-        k = self.apply_rotary_pos_emb(k, sin, cos)
+        # sin = freqs['sin'][:, :seq_len, :, :].to(self.device) 
+        # cos = freqs['cos'][:, :seq_len, :, :].to(self.device) # (1, seq_len, 1, head_dim // 2)
+        # q = self.apply_rotary_pos_emb(q, sin, cos) # no shape change
+        # k = self.apply_rotary_pos_emb(k, sin, cos)
 
         # normalizing & scaling our queries  & keys (see page 4)
         s_qk = self.s_qk() # (num_heads, head_dim)
@@ -183,7 +183,7 @@ class SelfAttention(nn.Module):
         logits = (q @ k.transpose(-2, -1)) * self.scale # (batch_size, num_heads, seq_len, seq_len)
             
         # here we mask out all the future-values
-        logits = logits.masked_fill(~mask, float('-inf'))  # (batch_size, num_heads, seq_len, seq_len)
+        logits = logits.masked_fill(mask, float('-inf'))  # (batch_size, num_heads, seq_len, seq_len)
 
         # Compute attention scores (grab the relevant values that correspond to the attention logits)
         scores =  F.softmax(logits, dim=-1) @ v # (batch_size, n_heads, seq_len, head_dim)
@@ -225,6 +225,105 @@ class SelfAttention(nn.Module):
 
         return x
 
+class CrossAttention(nn.Module):
+    """
+    A flexible self-attention module.
+
+    Args:
+        dim (int): Input and output dimension of the model.
+        head_dim (int): Dimension of each attention head.
+        num_heads (int): Number of heads.
+        device (str, optional): Device to run the module on. 
+            Defaults to CUDA if available, else MPS, else CPU.
+    """
+    def __init__(
+        self, 
+        dim: int,
+        num_heads: int,
+        device = None
+    ):
+        super().__init__()
+        self.device = (('cuda' if torch.cuda.is_available() else
+                        'mps' if torch.backends.mps.is_available() else 'cpu')
+                        if device is None else device)
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads 
+
+        # Define linear projections for queries, keys, and values
+        self.Wq = nn.Linear(dim, num_heads * self.head_dim, bias=False, device=self.device)
+        self.Wk = nn.Linear(dim, num_heads * self.head_dim, bias=False, device=self.device)
+        self.Wv = nn.Linear(dim, num_heads * self.head_dim, bias=False, device=self.device)
+
+        # the scaling factor to apply to the normalized queries & keys (see page 4)
+        self.s_qk = Scale(self.head_dim, heads=num_heads, scale = 1. / math.sqrt(dim), device=self.device)
+
+        # the scaling factor to apply to the attention logits to restore a variance of 1 (see page 4)
+        self.scale = self.head_dim ** 0.5
+
+        # Output projection that mixes all the attention heads back together
+        self.Wo = nn.Linear(num_heads * self.head_dim, dim, bias=False, device=self.device)
+        # this flag designates Wo to have a different parameter initialization as defined below in Model
+        self.Wo.GPT_scale_init = 1
+
+    def forward(self,
+        x: torch.Tensor,
+        memory: torch.Tensor,
+        # freqs: dict = None,
+        mask: torch.Tensor = None
+    ) -> torch.Tensor:
+        """
+        Forward pass for the self-attention module.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
+            freqs (dict, optional): Precomputed rotary positional encoding frequencies.
+            mask (torch.Tensor, optional): Attention mask tensor.
+
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, seq_len, dim).
+        """
+        batch_size, seq_len, _ = x.shape
+        
+        # Linear projections for queries, keys, and values
+        q, k, v = self.Wq(x), self.Wk(x), self.Wv(memory)
+            # shape: (batch_size, seq_len, dim) -> (batch_size, seq_len, num_heads * head_dim)
+
+        # Reshape projections to separate heads
+        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        k = k.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        v = v.view(batch_size, seq_len, self.num_heads, self.head_dim)
+
+        # applying RoPE
+        # sin = freqs['sin'][:, :seq_len, :, :].to(self.device) 
+        # cos = freqs['cos'][:, :seq_len, :, :].to(self.device) # (1, seq_len, 1, head_dim // 2)
+        # q = self.apply_rotary_pos_emb(q, sin, cos) # no shape change
+        # k = self.apply_rotary_pos_emb(k, sin, cos)
+
+        # normalizing & scaling our queries  & keys (see page 4)
+        s_qk = self.s_qk() # (num_heads, head_dim)
+        q = cosine_norm(q) * s_qk # then scale each head
+        k = cosine_norm(k) * s_qk # no shape change
+
+        # Transpose for attention computation
+        q = q.transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
+        k = k.transpose(1, 2)  
+        v = v.transpose(1, 2) 
+        
+        # Compute attention logits (compare queries & keys)
+        logits = (q @ k.transpose(-2, -1)) * self.scale # (batch_size, num_heads, seq_len, seq_len)
+            
+        # here we mask out all the future-values
+        logits = logits.masked_fill(mask, float('-inf'))  # (batch_size, num_heads, seq_len, seq_len)
+
+        # Compute attention scores (grab the relevant values that correspond to the attention logits)
+        scores =  F.softmax(logits, dim=-1) @ v # (batch_size, n_heads, seq_len, head_dim)
+
+        # Combine heads
+        scores = scores.transpose(1, 2).contiguous().view(batch_size, seq_len, -1) 
+            # (batch_size, seq_len, n_heads * head_dim)
+        
+        return self.Wo(scores) # (batch_size, seq_len, dim)
+    
 class MLP(nn.Module):
     """
     Multilayer Perceptron (MLP) module with optional gating and dropout.
@@ -306,6 +405,9 @@ class Layer(nn.Module):
             # not sure what scale to use with a_A and a_M. At one point i had it as 1./math.sqrt(cfg.dim)
             # but now i can't find the reference to that in the paper
 
+        #EDIT
+        self.cross_attn = CrossAttention(cfg.dim, cfg.num_heads, self.device)
+        self.alpha_C = Scale(cfg.dim, init = 0.05, scale = 1. / math.sqrt(cfg.dim), device=self.device)
         ### feedforward connection
         # ensures mlp_hidden_mult maintains the same parameter count as if we were using a not-gated MLP
         mult = cfg.mlp_hidden_mult * 2/3
@@ -313,7 +415,7 @@ class Layer(nn.Module):
         # eigen learning rate vector
         self.alpha_M = Scale(cfg.dim, init = 0.05, scale = 1. / math.sqrt(cfg.dim), device=self.device)
         
-    def forward(self, h: torch.Tensor, freqs: dict, mask: torch.Tensor) -> torch.Tensor:
+    def forward(self, h: torch.Tensor, m: torch.Tensor, mask: torch.Tensor) -> torch.Tensor: #freqs: dict, 
         """
         Forward pass of the Layer module.
 
@@ -325,43 +427,66 @@ class Layer(nn.Module):
         Returns:
             torch.Tensor: Output tensor of shape (batch_size, seq_len, dim).
         """
-        h_A = cosine_norm(self.attn(h, freqs, mask))
+        # print("LAYER")
+        # print(h.shape, h)
+        # print(m.shape, m)
+        # print(mask.shape, mask)
+        # print("--------------------------------")
+        h_A = cosine_norm(self.attn(h, mask)) #freqs, 
         h = cosine_norm(h + self.alpha_A() * (h_A - h))
+        # print(h_A.shape, h_A)
+        # print(h.shape, h)
+        # print("--------------------------------")
+        
+        #EDIT
+        h_C = cosine_norm(self.cross_attn(h, m, mask))#freqs, 
+        h = cosine_norm(h + self.alpha_C() * (h_C - h))
+        # print(h.shape, h)
+        # print("--------------------------------")
+        
+        
         h_M = cosine_norm(self.mlp(h))
         h = cosine_norm(h + self.alpha_M() * (h_M - h))
+        
         return h
 
-class Model(nn.Module):
+class NGPT_DECODER(nn.Module):
     def __init__(self, cfg):
+        # dim: int = 128
+        # device: str = None
+        #     # defaults to best available GPU/CPU
+        # num_layers: int = 8
+        # num_heads: int = 4 # number of heads in the multi-head attention mechanism
+        # mlp_hidden_mult: float = 4 # how wide the hidden dimension of the MLP should be
         super().__init__()
         self.device = (('cuda' if torch.cuda.is_available() else
                         'mps' if torch.backends.mps.is_available() else 'cpu')
                         if cfg.device is None else cfg.device)
         self.dim = cfg.dim
         self.num_layers = cfg.num_layers
-        self.max_seq_len = cfg.max_seq_len
-        self.vocab_len = cfg.vocab_len
+        # self.max_seq_len = cfg.max_seq_len
+        # self.vocab_len = cfg.vocab_len
 
         ### positional encodings
-        self.precompute_freqs = PrecomputeRotaryFrequencies(cfg.dim // cfg.num_heads, cfg.max_seq_len, cfg.theta, self.device)
+        # self.precompute_freqs = PrecomputeRotaryFrequencies(cfg.dim // cfg.num_heads, cfg.max_seq_len, cfg.theta, self.device)
 
         # residual state initialization
-        self.token_embedder = nn.Embedding(self.vocab_len, cfg.dim, device=self.device)
+        # self.token_embedder = nn.Embedding(self.vocab_len, cfg.dim, device=self.device)
 
         # the causal attention mask
-        self.mask = torch.ones(cfg.max_seq_len, cfg.max_seq_len, dtype=torch.bool, device=self.device).tril()
+        # self.mask = torch.ones(cfg.max_seq_len, cfg.max_seq_len, dtype=torch.bool, device=self.device).tril()
             # False -> "mask this token" while True -> "Let the model see this token"
 
         # the model itself
         self.layers = nn.ModuleList(Layer(cfg) for _ in range(cfg.num_layers))
 
         # the output projection
-        self.output = nn.Linear(cfg.dim, self.vocab_len, bias=False, device=self.device)
+        # self.output = nn.Linear(cfg.dim, self.vocab_len, bias=False, device=self.device)
         # scaling param to un-limit the range for the final probability distribution (see page 2)
-        self.s_z = Scale(self.vocab_len, scale = 1./math.sqrt(self.dim), device=self.device)
+        # self.s_z = Scale(self.vocab_len, scale = 1./math.sqrt(self.dim), device=self.device)
 
         # loss function
-        self.criterion = nn.CrossEntropyLoss(ignore_index = self.vocab_len -1) # ignore the padding token
+        # self.criterion = nn.CrossEntropyLoss(ignore_index = self.vocab_len -1) # ignore the padding token
 
         # initializing params to specific distributions
         self.apply(self.__init__weights)
@@ -415,6 +540,7 @@ class Model(nn.Module):
         # Enforce absolute value on eigen learning rates
         for layer in self.layers:
             layer.alpha_A.s.data.abs_()
+            layer.alpha_C.s.data.abs_()
             layer.alpha_M.s.data.abs_()
         
         # Cosine normalize relevant Linear layers
@@ -428,48 +554,54 @@ class Model(nn.Module):
         The token embeddings are not included
         """
         n_params = sum(p.numel() for p in self.parameters())
-        n_params -= self.token_embedder.weight.numel()
+        # n_params -= self.token_embedder.weight.numel()
         return n_params
 
     def forward(
         self, 
-        input_token_ids: torch.Tensor, 
-        target_token_ids: torch.Tensor = None,
-    ) -> (torch.Tensor, torch.Tensor):
+        source_nodes: torch.Tensor, 
+        mask: torch.Tensor,
+        encoder_output: torch.Tensor = None,
+    ) -> (torch.Tensor):
         """
         Our N-GPT's primary forward function that calls all the other modules
         """
-        input_token_ids = input_token_ids.to(self.device)
-        batch_size, seq_len = input_token_ids.shape
-        if target_token_ids is not None: # training setup
-            target_token_ids = target_token_ids.to(self.device)
-            assert batch_size, seq_len == target_token_ids.shape
-            assert seq_len == self.max_seq_len
+        # source_nodes = source_nodes.to(self.device)
+        # batch_size, seq_len = source_nodes.shape
+        # if target_token_ids is not None: # training setup
+        #     target_token_ids = target_token_ids.to(self.device)
+        #     assert batch_size, seq_len == target_token_ids.shape
+            # assert seq_len == self.max_seq_len
         
         # creating our causal self-attention mask
-        mask = self.mask[:seq_len, :seq_len]
+        # mask = self.mask[:seq_len, :seq_len]
 
         # precomputing our RoPE frequencies
-        freqs = self.precompute_freqs() 
+        # freqs = self.precompute_freqs() 
             # dict {'sin': shape (1, max_seq_len, 1, head_dim), 'cos': shape (1, max_seq_len, 1, head_dim)}
       
         # initializing the first residual state
-        x = self.token_embedder(input_token_ids) # (batch_size, seq_len, dim)
-        
+        # x = self.token_embedder(source_nodes) # (batch_size, seq_len, dim)
+        x = source_nodes.clone().detach()
         # run through the model's layers
         for layer in self.layers:
-            x = layer(x, freqs, mask)
+            x = layer(x, encoder_output, mask)
         
         # the final output of the model
-        logits = self.output(x) # (batch_size, seq_len, vocab_len)
-        # to un-limit the temperature of the final probability distribution (see page 2)
-        scaled_logits = logits * self.s_z()
+        logits = x#self.output(x) # (batch_size, seq_len, vocab_len)
         
-        loss = None
-        if target_token_ids is not None: # if we're training, calculate the loss
-            loss = self.criterion(
-                scaled_logits.view(batch_size * seq_len, self.vocab_len),
-                target_token_ids.reshape(batch_size * seq_len)
-            )
+        
+        return logits
+        # to un-limit the temperature of the final probability distribution (see page 2)
+        
+        #EDIT
+        # scaled_logits = logits * self.s_z()
+        
+        # loss = None
+        # if target_token_ids is not None: # if we're training, calculate the loss
+        #     loss = self.criterion(
+        #         scaled_logits.view(batch_size * seq_len, self.vocab_len),
+        #         target_token_ids.reshape(batch_size * seq_len)
+        #     )
 
-        return logits, loss
+        # return logits, loss
