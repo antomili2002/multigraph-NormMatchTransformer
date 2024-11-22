@@ -218,7 +218,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         optimizer, milestones=lr_milestones, gamma=lr_decay
     )
     torch.autograd.set_detect_anomaly(True)
-
+    all_error_dict = {}
     result_dict = {}
     for epoch in range(start_epoch, num_epochs):
         if local_rank == 0:
@@ -297,7 +297,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 
                 target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
                 
-                target_points = cosine_norm(target_points)
+                # target_points = cosine_norm(target_points)
                 
                 batch_size = model_output.size()[0]
                 num_points1 = model_output.size()[1]
@@ -364,13 +364,16 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                     for name, param in model.named_parameters():
                         if "n_gpt_decoder" in name:  # Check if the parameter belongs to the excluded module
                             continue
+                        if "n_gpt_encoder" in name:
+                            continue
                         elif param.grad is not None:
                             torch.nn.utils.clip_grad_norm_(param, max_norm)# Skip excluded parameters
                 #TODO: Clip without Decoder layer
             
                 optimizer.step()
 
-                model.module.n_gpt_decoder.enforce_constraints() 
+                model.module.n_gpt_decoder.enforce_constraints()
+                model.module.n_gpt_encoder.enforce_constraints() 
                 
             with torch.no_grad():
                 matchings = []
@@ -386,7 +389,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 for np in range(N_t):
                     
                     target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list,  perm_mat_list, n_points_sample, eval_pred_points, in_training= False)
-                    target_points = cosine_norm(target_points)
+                    # target_points = cosine_norm(target_points)
                     batch_size = model_output.size()[0]
                     num_points1 = model_output.size()[1]
                     for b in range(batch_size):
@@ -461,7 +464,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         
         if (epoch+1) % cfg.STATISTIC_STEP == 0:
             if local_rank == 0:
-                accs, f1_scores = eval.eval_model(model, dataloader["test"], local_rank)
+                accs, f1_scores, error_dict = eval.eval_model(model, dataloader["test"], local_rank)
+                all_error_dict[epoch+1] = error_dict
                 wandb.log({"mean test_acc": torch.mean(accs), "mean test_f1": torch.mean(f1_scores)})
         
         if cfg.save_checkpoint:
@@ -475,10 +479,10 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         
         
         
-
+    print(all_error_dict)
     
     
-    return model
+    return model, all_error_dict
 
 
 if __name__ == "__main__":
@@ -486,10 +490,10 @@ if __name__ == "__main__":
     cfg = update_params_from_cmdline(default_params=cfg)
     
     #windows
-    # dist.init_process_group(backend='gloo', init_method='env://')
+    dist.init_process_group(backend='gloo', init_method='env://')
     
     #linux
-    dist.init_process_group(backend='nccl', init_method='env://')
+    # dist.init_process_group(backend='nccl', init_method='env://')
     
     local_rank = int(os.environ['LOCAL_RANK']) 
     
@@ -576,7 +580,7 @@ if __name__ == "__main__":
         Path(cfg.model_dir).mkdir(parents=True)
 
     num_epochs, _, __ = lr_schedules[cfg.TRAIN.lr_schedule]
-    model = train_eval_model(model, 
+    model, all_error_dict = train_eval_model(model, 
                                    criterion, 
                                    optimizer,
                                    dataloader,
@@ -587,4 +591,34 @@ if __name__ == "__main__":
                                    start_epoch=0,
                                    )
     
+    if local_rank == 0:
+        output_folder = "errors"
+        os.makedirs(output_folder, exist_ok=True)
+        for epoch, class_dict in all_error_dict.items():
+            save_dict = {}
+            for class_, e_dict in class_dict.items():
+                e_dict_ = sorted(e_dict.items())
+                e_len, e_idx = e_dict_[-1]
+                result_tensor = torch.zeros(e_len, dtype=torch.float).to(device)
+                e_num = 0
+                for errors in e_dict_:
+                    e_len, e_idx = errors
+                    
+                    e_ten = e_idx[1]
+                    t1_resized = torch.cat((e_ten, torch.zeros(result_tensor.size(0) - e_ten.size(0), dtype=result_tensor.dtype).to(device))).to(device)
+                    
+                    result_tensor += t1_resized
+                    e_num += e_idx[0]
+                # e_num = e_idx[0]
+                # e_tensor = e_idx[1]
+                
+                e_avg = (result_tensor/e_num).cpu().detach().tolist()
+                
+                save_dict[class_] = e_avg
+                
+            file_name = f"{output_folder}/epoch_{epoch}_save_dict.json"
+            with open(file_name, "w") as json_file:
+                json.dump(save_dict, json_file)
+            
+                
     dist.destroy_process_group()

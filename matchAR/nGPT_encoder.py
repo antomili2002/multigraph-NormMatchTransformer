@@ -182,8 +182,10 @@ class SelfAttention(nn.Module):
         # Compute attention logits (compare queries & keys)
         logits = (q @ k.transpose(-2, -1)) * self.scale # (batch_size, num_heads, seq_len, seq_len)
         
+        mask_ = mask.unsqueeze(1).unsqueeze(2)
+        
         # here we mask out all the future-values
-        logits = logits.masked_fill(mask, float('-inf'))  # (batch_size, num_heads, seq_len, seq_len)
+        logits = logits.masked_fill(mask_, float('-inf'))  # (batch_size, num_heads, seq_len, seq_len)
 
         # Compute attention scores (grab the relevant values that correspond to the attention logits)
         scores =  F.softmax(logits, dim=-1) @ v # (batch_size, n_heads, seq_len, head_dim)
@@ -225,105 +227,6 @@ class SelfAttention(nn.Module):
 
         return x
 
-class CrossAttention(nn.Module):
-    """
-    A flexible self-attention module.
-
-    Args:
-        dim (int): Input and output dimension of the model.
-        head_dim (int): Dimension of each attention head.
-        num_heads (int): Number of heads.
-        device (str, optional): Device to run the module on. 
-            Defaults to CUDA if available, else MPS, else CPU.
-    """
-    def __init__(
-        self, 
-        dim: int,
-        num_heads: int,
-        device = None
-    ):
-        super().__init__()
-        self.device = (('cuda' if torch.cuda.is_available() else
-                        'mps' if torch.backends.mps.is_available() else 'cpu')
-                        if device is None else device)
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads 
-
-        # Define linear projections for queries, keys, and values
-        self.Wq = nn.Linear(dim, num_heads * self.head_dim, bias=False, device=self.device)
-        self.Wk = nn.Linear(dim, num_heads * self.head_dim, bias=False, device=self.device)
-        self.Wv = nn.Linear(dim, num_heads * self.head_dim, bias=False, device=self.device)
-
-        # the scaling factor to apply to the normalized queries & keys (see page 4)
-        self.s_qk = Scale(self.head_dim, heads=num_heads, scale = 1. / math.sqrt(dim), device=self.device)
-
-        # the scaling factor to apply to the attention logits to restore a variance of 1 (see page 4)
-        self.scale = self.head_dim ** 0.5
-
-        # Output projection that mixes all the attention heads back together
-        self.Wo = nn.Linear(num_heads * self.head_dim, dim, bias=False, device=self.device)
-        # this flag designates Wo to have a different parameter initialization as defined below in Model
-        self.Wo.GPT_scale_init = 1
-
-    def forward(self,
-        x: torch.Tensor,
-        memory: torch.Tensor,
-        # freqs: dict = None,
-        mask: torch.Tensor = None
-    ) -> torch.Tensor:
-        """
-        Forward pass for the self-attention module.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
-            freqs (dict, optional): Precomputed rotary positional encoding frequencies.
-            mask (torch.Tensor, optional): Attention mask tensor.
-
-        Returns:
-            torch.Tensor: Output tensor of shape (batch_size, seq_len, dim).
-        """
-        batch_size, seq_len, _ = x.shape
-        
-        # Linear projections for queries, keys, and values
-        q, k, v = self.Wq(x), self.Wk(x), self.Wv(memory)
-            # shape: (batch_size, seq_len, dim) -> (batch_size, seq_len, num_heads * head_dim)
-
-        # Reshape projections to separate heads
-        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        k = k.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        v = v.view(batch_size, seq_len, self.num_heads, self.head_dim)
-
-        # applying RoPE
-        # sin = freqs['sin'][:, :seq_len, :, :].to(self.device) 
-        # cos = freqs['cos'][:, :seq_len, :, :].to(self.device) # (1, seq_len, 1, head_dim // 2)
-        # q = self.apply_rotary_pos_emb(q, sin, cos) # no shape change
-        # k = self.apply_rotary_pos_emb(k, sin, cos)
-
-        # normalizing & scaling our queries  & keys (see page 4)
-        s_qk = self.s_qk() # (num_heads, head_dim)
-        q = cosine_norm(q) * s_qk # then scale each head
-        k = cosine_norm(k) * s_qk # no shape change
-
-        # Transpose for attention computation
-        q = q.transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
-        k = k.transpose(1, 2)  
-        v = v.transpose(1, 2) 
-        
-        # Compute attention logits (compare queries & keys)
-        logits = (q @ k.transpose(-2, -1)) * self.scale # (batch_size, num_heads, seq_len, seq_len)
-            
-        # here we mask out all the future-values
-        logits = logits.masked_fill(mask, float('-inf'))  # (batch_size, num_heads, seq_len, seq_len)
-
-        # Compute attention scores (grab the relevant values that correspond to the attention logits)
-        scores =  F.softmax(logits, dim=-1) @ v # (batch_size, n_heads, seq_len, head_dim)
-
-        # Combine heads
-        scores = scores.transpose(1, 2).contiguous().view(batch_size, seq_len, -1) 
-            # (batch_size, seq_len, n_heads * head_dim)
-        
-        return self.Wo(scores) # (batch_size, seq_len, dim)
-    
 class MLP(nn.Module):
     """
     Multilayer Perceptron (MLP) module with optional gating and dropout.
@@ -406,8 +309,8 @@ class Layer(nn.Module):
             # but now i can't find the reference to that in the paper
 
         #EDIT
-        self.cross_attn = CrossAttention(cfg.dim, cfg.num_heads, self.device)
-        self.alpha_C = Scale(cfg.dim, init = 0.05, scale = 1. / math.sqrt(cfg.dim), device=self.device)
+        # self.cross_attn = CrossAttention(cfg.dim, cfg.num_heads, self.device)
+        # self.alpha_C = Scale(cfg.dim, init = 0.05, scale = 1. / math.sqrt(cfg.dim), device=self.device)
         ### feedforward connection
         # ensures mlp_hidden_mult maintains the same parameter count as if we were using a not-gated MLP
         mult = cfg.mlp_hidden_mult * 2/3
@@ -415,7 +318,7 @@ class Layer(nn.Module):
         # eigen learning rate vector
         self.alpha_M = Scale(cfg.dim, init = 0.05, scale = 1. / math.sqrt(cfg.dim), device=self.device)
         
-    def forward(self, h: torch.Tensor, m: torch.Tensor, mask: torch.Tensor) -> torch.Tensor: #freqs: dict, 
+    def forward(self, h: torch.Tensor, mask: torch.Tensor) -> torch.Tensor: #freqs: dict, 
         """
         Forward pass of the Layer module.
 
@@ -439,8 +342,8 @@ class Layer(nn.Module):
         # print("--------------------------------")
         
         #EDIT
-        h_C = cosine_norm(self.cross_attn(h, m, mask))#freqs, 
-        h = cosine_norm(h + self.alpha_C() * (h_C - h))
+        # h_C = cosine_norm(self.cross_attn(h, m, mask))#freqs, 
+        # h = cosine_norm(h + self.alpha_C() * (h_C - h))
         # print(h.shape, h)
         # print("--------------------------------")
         
@@ -450,7 +353,7 @@ class Layer(nn.Module):
         
         return h
 
-class NGPT_DECODER(nn.Module):
+class NGPT_ENCODER(nn.Module):
     def __init__(self, cfg):
         # dim: int = 128
         # device: str = None
@@ -540,7 +443,6 @@ class NGPT_DECODER(nn.Module):
         # Enforce absolute value on eigen learning rates
         for layer in self.layers:
             layer.alpha_A.s.data.abs_()
-            layer.alpha_C.s.data.abs_()
             layer.alpha_M.s.data.abs_()
         
         # Cosine normalize relevant Linear layers
@@ -561,7 +463,6 @@ class NGPT_DECODER(nn.Module):
         self, 
         source_nodes: torch.Tensor, 
         mask: torch.Tensor,
-        encoder_output: torch.Tensor = None,
     ) -> (torch.Tensor):
         """
         Our N-GPT's primary forward function that calls all the other modules
@@ -585,7 +486,7 @@ class NGPT_DECODER(nn.Module):
         x = source_nodes
         # run through the model's layers
         for layer in self.layers:
-            x = layer(x, encoder_output, mask)
+            x = layer(x, mask)
         
         # the final output of the model
         logits = x#self.output(x) # (batch_size, seq_len, vocab_len)

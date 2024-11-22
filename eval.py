@@ -114,7 +114,7 @@ def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
                 for np in range(N_t):
                     
                     target_points, model_output = model(data_list, points_gt, edges, n_points_gt,  perm_mat_list, n_points_sample, eval_pred_points, in_training= False)
-                    target_points = cosine_norm(target_points)
+                    # target_points = cosine_norm(target_points)
                     
                     batch_size = model_output.size()[0]
                     num_points1 = model_output.size()[1]
@@ -226,4 +226,4 @@ def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
     #     cls_error_distribution = binned_matches / binned_counts
     #     err_dist[cls] = cls_error_distribution
 
-    return accs, f1_scores
+    return accs, f1_scores, error_dist_dict

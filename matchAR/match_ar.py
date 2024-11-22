@@ -15,6 +15,7 @@ from utils.utils import lexico_iter
 from utils.evaluation_metric import make_perm_mat_pred
 from utils.visualization import easy_visualize
 from matchAR.nGPT_decoder import NGPT_DECODER
+from matchAR.nGPT_encoder import NGPT_ENCODER
 
 
 def normalize_over_channels(x):
@@ -120,12 +121,19 @@ class MatchARNet(utils.backbone.VGG16_bn):
         self.tf_encoder = nn.TransformerEncoder(self.tf_encoder_layer, num_layers=cfg.Matching_TF.n_encoder)
         self.tf_decoder = nn.TransformerDecoder(self.tf_decoder_layer, num_layers=cfg.Matching_TF.n_decoder)
         
-        nGPT_config = ModelConfig()
-        nGPT_config.dim = cfg.Matching_TF.d_model
-        nGPT_config.num_layers = cfg.Matching_TF.n_decoder
-        nGPT_config.num_heads = cfg.Matching_TF.n_head # number of heads in the multi-head attention mechanism
-        nGPT_config.mlp_hidden_mult  = 4
-        self.n_gpt_decoder = NGPT_DECODER(nGPT_config)
+        nGPT_decoder_config = ModelConfig()
+        nGPT_decoder_config.dim = cfg.Matching_TF.d_model
+        nGPT_decoder_config.num_layers = cfg.Matching_TF.n_decoder
+        nGPT_decoder_config.num_heads = cfg.Matching_TF.n_head # number of heads in the multi-head attention mechanism
+        nGPT_decoder_config.mlp_hidden_mult  = 4
+        self.n_gpt_decoder = NGPT_DECODER(nGPT_decoder_config)
+        
+        nGPT_encoder_config = ModelConfig()
+        nGPT_encoder_config.dim = cfg.Matching_TF.d_model
+        nGPT_encoder_config.num_layers = cfg.Matching_TF.n_encoder
+        nGPT_encoder_config.num_heads = cfg.Matching_TF.n_head # number of heads in the multi-head attention mechanism
+        nGPT_encoder_config.mlp_hidden_mult  = 4
+        self.n_gpt_encoder = NGPT_ENCODER(nGPT_encoder_config)
         
         self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, l2_scaling=True)
         self.mlp_out_2 = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, l2_scaling=True)
@@ -247,7 +255,9 @@ class MatchARNet(utils.backbone.VGG16_bn):
         S_mask = ~torch.cat((s_mask, t_mask), dim=1)
         # input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
         input = torch.cat((h_s, h_t), dim=1)
-        encoder_output = self.tf_encoder(src=input, src_key_padding_mask=S_mask)
+        
+        # encoder_output = self.tf_encoder(src=input, src_key_padding_mask=S_mask)
+        encoder_output = self.n_gpt_encoder(input, S_mask)
         
         
         sample_size_each = encoder_output.size()[1] // 2 #Get the amount of concatenated points
