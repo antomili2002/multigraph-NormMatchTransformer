@@ -39,7 +39,7 @@ lr_schedules = {
     #TODO: CHANGE BACK TO 10
     "long_halving1": (32, (4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
     "long_halving2": (40, (8, 22, 35), 0.1),
-    "long_halving3": (32, (6, 16, 28), 0.5),
+    "long_halving3": (32, (6, 22), 0.5),
     # "long_halving": (30, (3, 6, 12, 26), 0.25),
     # "long_halving": (50, (40,), 0.1),
     "short_halving": (2, (1,), 0.5),
@@ -165,6 +165,9 @@ def cosine_norm(x, dim=-1):
         return x / norm
 def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epochs, local_rank, resume=False, start_epoch=0):
     
+    
+    
+    
     since = time.time()
     dataloader["train"].dataset.set_num_graphs(cfg.TRAIN.num_graphs_in_matching_instance)
     dataset_size = len(dataloader["train"].dataset)
@@ -190,28 +193,29 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
 
     # Evaluation only
     if cfg.evaluate_only:
-        assert resume
-        print(f"Evaluating without training...")
-        accs, f1_scores = eval.eval_model(model, dataloader["test"], eval_epoch=2)
-        acc_dict = {
-            "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.classes, accs)
-        }
-        f1_dict = {
-            "f1_{}".format(cls): single_f1_score
-            for cls, single_f1_score in zip(dataloader["train"].dataset.classes, f1_scores)
-        }
-        acc_dict.update(f1_dict)
-        acc_dict["matching_accuracy"] = torch.mean(accs)
-        acc_dict["f1_score"] = torch.mean(f1_scores)
+        # assert resume
+        if local_rank == 0:
+            print(f"Evaluating without training...")
+            accs, f1_scores, error_dict = eval.eval_model(model, dataloader["test"], local_rank, eval_epoch=32)
+            acc_dict = {
+                "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.classes, accs)
+            }
+            f1_dict = {
+                "f1_{}".format(cls): single_f1_score
+                for cls, single_f1_score in zip(dataloader["train"].dataset.classes, f1_scores)
+            }
+            acc_dict.update(f1_dict)
+            acc_dict["matching_accuracy"] = torch.mean(accs)
+            acc_dict["f1_score"] = torch.mean(f1_scores)
 
-        time_elapsed = time.time() - since
-        print(
-            "Evaluation complete in {:.0f}h {:.0f}m {:.0f}s".format(
-                time_elapsed // 3600, (time_elapsed // 60) % 60, time_elapsed % 60
+            time_elapsed = time.time() - since
+            print(
+                "Evaluation complete in {:.0f}h {:.0f}m {:.0f}s".format(
+                    time_elapsed // 3600, (time_elapsed // 60) % 60, time_elapsed % 60
+                )
             )
-        )
         
-        return model
+        return model, None
 
     _, lr_milestones, lr_decay = lr_schedules[cfg.TRAIN.lr_schedule]
     scheduler = optim.lr_scheduler.MultiStepLR(
@@ -220,6 +224,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
     torch.autograd.set_detect_anomaly(True)
     all_error_dict = {}
     result_dict = {}
+    
+    
     for epoch in range(start_epoch, num_epochs):
         if local_rank == 0:
             print("Epoch {}/{}".format(epoch, num_epochs - 1))
@@ -304,6 +310,10 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 total_loss = 0
                 total_cosine_similarities = []
                 
+                for idx, e in enumerate(n_points_gt_sample):
+                    perm_mat_list[0][idx, e:, :] = 0
+                
+                
                 for b in range(batch_size):
                     batch_loss = 0
                     batch_cosine_similarities = []
@@ -319,6 +329,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 similarity_scores = similarity_scores.masked_select(expanded_mask).view(-1, perm_mat_list[0].size(2))
                 y_values = perm_mat_list[0].masked_select(expanded_mask).view(-1, perm_mat_list[0].size(2))
                 y_values_ = torch.argmax(y_values, dim=1)
+                
                 loss = criterion(similarity_scores, y_values_)
                 
                 
@@ -379,7 +390,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 matchings = []
                 B, N_s, N_t = perm_mat_list[0].size()
                 
-                n_points_sample = torch.zeros(B, dtype=torch.int).to(device)
+                # n_points_sample = torch.zeros(B, dtype=torch.int).to(device)
                 
                 eval_pred_points = 0
                 j_pred = 0
@@ -388,7 +399,15 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                     predictions_list.append([])
                 for np in range(N_t):
                     
-                    target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list,  perm_mat_list, n_points_sample, eval_pred_points, in_training= False)
+        # images,
+        # points,
+        # graphs,
+        # n_points,
+        # n_points_sample, 
+        # perm_mats,
+        # eval_pred_points=None,
+        # in_training=True
+                    target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list,  n_points_gt_sample, perm_mat_list, eval_pred_points=eval_pred_points, in_training= False)
                     # target_points = cosine_norm(target_points)
                     batch_size = model_output.size()[0]
                     num_points1 = model_output.size()[1]
@@ -397,7 +416,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                         cosine_similarities = torch.atanh(cosine_similarities)
                         cosine_scores = F.softmax(cosine_similarities, dim=-1)
                         cosine_matchings = torch.argmax(cosine_scores, dim=-1)
-                        if eval_pred_points < n_points_gt_list[0][b]:
+                        if eval_pred_points < n_points_gt_sample[b]:
                             predictions_list[b].append(cosine_matchings.item())
                         else:
                             predictions_list[b].append(-1)
@@ -408,7 +427,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 
                 error_list = (prediction_tensor != y_values_matching).int()
             
-                for idx, e in enumerate(n_points_gt_list[0]):
+                for idx, e in enumerate(n_points_gt_sample):
                     if e.item() not in result_dict:
                         result_dict[e.item()] = [1, error_list[idx,:e.item()]]
                     result_dict[e.item()][0] += 1
@@ -490,10 +509,10 @@ if __name__ == "__main__":
     cfg = update_params_from_cmdline(default_params=cfg)
     
     #windows
-    dist.init_process_group(backend='gloo', init_method='env://')
+    # dist.init_process_group(backend='gloo', init_method='env://')
     
     #linux
-    # dist.init_process_group(backend='nccl', init_method='env://')
+    dist.init_process_group(backend='nccl', init_method='env://')
     
     local_rank = int(os.environ['LOCAL_RANK']) 
     
@@ -592,33 +611,34 @@ if __name__ == "__main__":
                                    )
     
     if local_rank == 0:
-        output_folder = "errors"
-        os.makedirs(output_folder, exist_ok=True)
-        for epoch, class_dict in all_error_dict.items():
-            save_dict = {}
-            for class_, e_dict in class_dict.items():
-                e_dict_ = sorted(e_dict.items())
-                e_len, e_idx = e_dict_[-1]
-                result_tensor = torch.zeros(e_len, dtype=torch.float).to(device)
-                e_num = 0
-                for errors in e_dict_:
-                    e_len, e_idx = errors
+        if all_error_dict is not None:
+            output_folder = "errors"
+            os.makedirs(output_folder, exist_ok=True)
+            for epoch, class_dict in all_error_dict.items():
+                save_dict = {}
+                for class_, e_dict in class_dict.items():
+                    e_dict_ = sorted(e_dict.items())
+                    e_len, e_idx = e_dict_[-1]
+                    result_tensor = torch.zeros(e_len, dtype=torch.float).to(device)
+                    e_num = 0
+                    for errors in e_dict_:
+                        e_len, e_idx = errors
+                        
+                        e_ten = e_idx[1]
+                        t1_resized = torch.cat((e_ten, torch.zeros(result_tensor.size(0) - e_ten.size(0), dtype=result_tensor.dtype).to(device))).to(device)
+                        
+                        result_tensor += t1_resized
+                        e_num += e_idx[0]
+                    # e_num = e_idx[0]
+                    # e_tensor = e_idx[1]
                     
-                    e_ten = e_idx[1]
-                    t1_resized = torch.cat((e_ten, torch.zeros(result_tensor.size(0) - e_ten.size(0), dtype=result_tensor.dtype).to(device))).to(device)
+                    e_avg = (result_tensor/e_num).cpu().detach().tolist()
                     
-                    result_tensor += t1_resized
-                    e_num += e_idx[0]
-                # e_num = e_idx[0]
-                # e_tensor = e_idx[1]
-                
-                e_avg = (result_tensor/e_num).cpu().detach().tolist()
-                
-                save_dict[class_] = e_avg
-                
-            file_name = f"{output_folder}/epoch_{epoch}_save_dict.json"
-            with open(file_name, "w") as json_file:
-                json.dump(save_dict, json_file)
+                    save_dict[class_] = e_avg
+                    
+                file_name = f"{output_folder}/epoch_{epoch}_save_dict.json"
+                with open(file_name, "w") as json_file:
+                    json.dump(save_dict, json_file)
             
                 
     dist.destroy_process_group()

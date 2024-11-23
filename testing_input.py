@@ -6,24 +6,40 @@ import torch.nn as nn
 # Sample input
 batch = 2
 seq_len = 5
+dim = 10
 
+f = torch.tensor([1, 5]).unsqueeze(1)
+t = torch.rand((batch, seq_len, dim))
+
+k1 = torch.tensor([[ True,  True,  True,  True,  True, False, False, False, False, False,
+         False, False, False, False, False, False, False, False, False],
+        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
+          True,  True,  True,  True,  True,  True,  True,  True,  True]], dtype=torch.bool)
+
+print(t)
+
+for idx, e in enumerate(f):
+    t[idx, e:, :] = 0
+    k1[idx, e:] = False
+print(k1)
+print(t)
 # Attention matrix: [batch, seq_len, seq_len]
-nested_dict = {
-    1: {
-        'aeroplane': {9: [2, torch.tensor([2, 2, 2, 2, 2, 2, 2, 2, 2], device='cuda:0', dtype=torch.int32)], 11: [2, torch.tensor([2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1], device='cuda:0', dtype=torch.int32)], 5: [2, torch.tensor([2, 2, 2, 2, 2, 2,  2, 2, 1, 1], device='cuda:0', dtype=torch.int32)]},
-        'bicycle': {11: [2, torch.tensor([0, 2, 2, 2, 2, 2, 2, 2, 0, 0, 2], device='cuda:0', dtype=torch.int32)]},
-        'bird': {5: [2, torch.tensor([2, 0, 0, 2, 2], device='cuda:0', dtype=torch.int32)]},
-        # Rest of the data...
-    }
-}
-# for main_key, sub_dict in nested_dict.items():
-#     print(f"Main Key: {main_key}")
-#     for category, inner_dict in sub_dict.items():
-#         print(category)
-k = sorted(nested_dict[1]["aeroplane"].items())
+# nested_dict = {
+#     1: {
+#         'aeroplane': {9: [2, torch.tensor([2, 2, 2, 2, 2, 2, 2, 2, 2], device='cuda:0', dtype=torch.int32)], 11: [2, torch.tensor([2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1], device='cuda:0', dtype=torch.int32)], 5: [2, torch.tensor([2, 2, 2, 2, 2, 2,  2, 2, 1, 1], device='cuda:0', dtype=torch.int32)]},
+#         'bicycle': {11: [2, torch.tensor([0, 2, 2, 2, 2, 2, 2, 2, 0, 0, 2], device='cuda:0', dtype=torch.int32)]},
+#         'bird': {5: [2, torch.tensor([2, 0, 0, 2, 2], device='cuda:0', dtype=torch.int32)]},
+#         # Rest of the data...
+#     }
+# }
+# # for main_key, sub_dict in nested_dict.items():
+# #     print(f"Main Key: {main_key}")
+# #     for category, inner_dict in sub_dict.items():
+# #         print(category)
+# k = sorted(nested_dict[1]["aeroplane"].items())
 
 
-print(k)
+# print(k)
 # l = k[-1]
 # print(l)
 

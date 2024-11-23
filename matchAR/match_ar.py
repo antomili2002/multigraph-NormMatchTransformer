@@ -252,6 +252,13 @@ class MatchARNet(utils.backbone.VGG16_bn):
         # query_mask = query_mask.view(B, -1)
         # print(query_mask.size(), query_mask)
         
+        for idx, e in enumerate(n_points_sample):
+            s_mask[idx, e:] = False
+            # t_mask[idx, e:] = False
+            h_s[idx, e:, :] = 0
+            # h_t[idx, e:, :] = 0
+            
+        
         S_mask = ~torch.cat((s_mask, t_mask), dim=1)
         # input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
         input = torch.cat((h_s, h_t), dim=1)
