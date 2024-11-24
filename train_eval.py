@@ -39,7 +39,7 @@ lr_schedules = {
     #TODO: CHANGE BACK TO 10
     "long_halving1": (32, (4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
     "long_halving2": (40, (8, 22, 35), 0.1),
-    "long_halving3": (32, (6, 22), 0.5),
+    "long_halving3": (32, (6, 19, 28), 0.5),
     # "long_halving": (30, (3, 6, 12, 26), 0.25),
     # "long_halving": (50, (40,), 0.1),
     "short_halving": (2, (1,), 0.5),
@@ -291,8 +291,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                         points_gt_list = swap_src_tgt_order(points_gt_list, i)
                         n_points_gt_list = swap_src_tgt_order(n_points_gt_list, i)
                         edges_list = swap_src_tgt_order(edges_list, i)
-            n_points_gt_sample = n_points_gt_list[0].to('cpu').apply_(lambda x: torch.randint(low=0, high=x, size=(1,)).item()).to(device)
-            
+            n_points_gt_sample = n_points_gt_list[0] #n_points_gt_list[0].to('cpu').apply_(lambda x: torch.randint(low=1, high=x, size=(1,)).item()).to(device)
+           # print(n_points_gt_sample)
             iter_num = iter_num + 1
 
             # zero the parameter gradients
@@ -407,7 +407,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         # perm_mats,
         # eval_pred_points=None,
         # in_training=True
-                    target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list,  n_points_gt_sample, perm_mat_list, eval_pred_points=eval_pred_points, in_training= False)
+                    target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list,  n_points_gt_sample, perm_mat_list, eval_pred_points=eval_pred_points, in_training= True)
                     # target_points = cosine_norm(target_points)
                     batch_size = model_output.size()[0]
                     num_points1 = model_output.size()[1]
@@ -437,16 +437,13 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 has_one = perm_mat_list[0].sum(dim=2) != 0
                 expanded_mask = has_one.unsqueeze(-1).expand_as(perm_mat_list[0])
                 y_values = perm_mat_list[0].masked_select(expanded_mask).view(-1, perm_mat_list[0].size(2))
-                valid_mask = (prediction_tensor != -1) & (y_values_matching != -1)
-                valid_labels = prediction_tensor[valid_mask]
-                pred_mat = torch.zeros_like(y_values)
+                # valid_mask = (prediction_tensor != -1) & (y_values_matching != -1)
+                # valid_labels = prediction_tensor[valid_mask]
                 
-                for k in range(len(valid_labels)):
-                    pred_mat[k,valid_labels[k]] = 1
                 
                 batch_correct, batch_total_valid = calculate_correct_and_valid(prediction_tensor, y_values_matching)
-                # _tp, _fp, _fn = calculate_f1_score(prediction_tensor, y_values_matching)
-                _tp, _fp, _fn = get_pos_neg_from_lists(pred_mat, y_values)
+                _tp, _fp, _fn = calculate_f1_score(prediction_tensor, y_values_matching)
+                # _tp, _fp, _fn = get_pos_neg_from_lists(pred_mat, y_values)
                 epoch_correct += batch_correct
                 epoch_total_valid += batch_total_valid
                 tp += _tp
@@ -509,10 +506,10 @@ if __name__ == "__main__":
     cfg = update_params_from_cmdline(default_params=cfg)
     
     #windows
-    # dist.init_process_group(backend='gloo', init_method='env://')
+    dist.init_process_group(backend='gloo', init_method='env://')
     
     #linux
-    dist.init_process_group(backend='nccl', init_method='env://')
+    # dist.init_process_group(backend='nccl', init_method='env://')
     
     local_rank = int(os.environ['LOCAL_RANK']) 
     

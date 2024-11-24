@@ -4,25 +4,27 @@ import torch
 import torch.nn as nn
 
 # Sample input
-batch = 2
-seq_len = 5
-dim = 10
+import torch
+import torch.nn as nn
 
-f = torch.tensor([1, 5]).unsqueeze(1)
-t = torch.rand((batch, seq_len, dim))
+# Example raw and query patch embeddings
+Z_raw = torch.randn(10, 64)  # 10 raw patches, 64-dimensional embeddings
+Z_key = torch.randn(5, 64)   # 5 query patches, 64-dimensional embeddings
 
-k1 = torch.tensor([[ True,  True,  True,  True,  True, False, False, False, False, False,
-         False, False, False, False, False, False, False, False, False],
-        [ True,  True,  True,  True,  True,  True,  True,  True,  True,  True,
-          True,  True,  True,  True,  True,  True,  True,  True,  True]], dtype=torch.bool)
+# Learnable weight matrix for bilinear operation
+W = nn.Parameter(torch.randn(64, 64))
 
-print(t)
+# Compute bilinear features
+Z_bilinear = torch.matmul(Z_key, W)  # Shape: (10, 64)
+Z_bilinear = torch.matmul(Z_bilinear, Z_raw.T)  # Shape: (10, 5)
 
-for idx, e in enumerate(f):
-    t[idx, e:, :] = 0
-    k1[idx, e:] = False
-print(k1)
-print(t)
+W2 = nn.Parameter(torch.randn(10, 64))
+
+Z_bilinear = torch.matmul(Z_bilinear, W2)
+# Concatenate with query embeddings (expand query features to match dimensions)
+#Z_combined = torch.cat([Z_bilinear, Z_key.expand_as(Z_bilinear)], dim=-1)
+
+print(Z_bilinear.shape)  # Final shape would be (10, 5, 128)
 # Attention matrix: [batch, seq_len, seq_len]
 # nested_dict = {
 #     1: {

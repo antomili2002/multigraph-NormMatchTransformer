@@ -251,17 +251,18 @@ class MatchARNet(utils.backbone.VGG16_bn):
         
         # query_mask = query_mask.view(B, -1)
         # print(query_mask.size(), query_mask)
-        
-        for idx, e in enumerate(n_points_sample):
-            s_mask[idx, e:] = False
-            # t_mask[idx, e:] = False
-            h_s[idx, e:, :] = 0
-            # h_t[idx, e:, :] = 0
+        # print(n_points_sample)
+        if in_training is True:
+            for idx, e in enumerate(n_points_sample):
+                s_mask[idx, e:] = False
+                # t_mask[idx, e:] = False
+                h_s[idx, e:, :] = 0
+                # h_t[idx, e:, :] = 0
             
         
         S_mask = ~torch.cat((s_mask, t_mask), dim=1)
-        # input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
-        input = torch.cat((h_s, h_t), dim=1)
+        input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
+        # input = torch.cat((h_s, h_t), dim=1)
         
         # encoder_output = self.tf_encoder(src=input, src_key_padding_mask=S_mask)
         encoder_output = self.n_gpt_encoder(input, S_mask)
@@ -284,9 +285,7 @@ class MatchARNet(utils.backbone.VGG16_bn):
             tgt_padding_mask = torch.ones((batch_size, seq_len), dtype=torch.bool).to(source_points_mask.device)
             for i in range(batch_size):
                 if eval_pred_points < n_points[0][i]:
-                    tgt_padding_mask[i,:eval_pred_points+1] = 0
-                    
-        
+                    tgt_padding_mask[i,:eval_pred_points+1] = 0        
         
         dec_output = self.n_gpt_decoder(source_points, source_points_mask, target_points)
         
@@ -380,3 +379,10 @@ class MLPQuery(nn.Module):
             x = nn.functional.relu(x)
             out = self.lin2(x)
             return out
+
+
+
+class BilinearMLP(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        self.biLin = nn.Bilinear(input_dim, input_dim, output_dim)
+        
