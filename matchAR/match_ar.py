@@ -304,7 +304,9 @@ class MatchARNet(utils.backbone.VGG16_bn):
         
         
         co_sim = self.w_cosine(dec_output, target_points)
-        sim_score = torch.atanh(co_sim)
+        sim_score = co_sim#torch.atanh(co_sim)
+        
+        prototype_score = torch.bmm(target_points, target_points.transpose(1, 2))
         
         #TODO: test if with MLP and batchnorm or not / leave out mlp
         # print(decoder_output)
@@ -314,7 +316,7 @@ class MatchARNet(utils.backbone.VGG16_bn):
         # norm = torch.norm(target_points, p=2, dim=-1, keepdim=True).clamp(min=1e-6)
         # target_points = self.cosine_norm(target_points)
         # target_points /= norm
-        return sim_score#target_points, dec_output
+        return sim_score, prototype_score#target_points, dec_output
         
 
 

@@ -1,9 +1,9 @@
 {
-  "BATCH_SIZE": 2,
+  "BATCH_SIZE": 8,
   "DATASET_NAME": "PascalVOC",
   "exclude_willow_classes": false,
   "EVAL": {
-    "SAMPLES": 5,
+    "SAMPLES": 1500,
     "num_graphs_in_matching_instance": 2
   },
   "SPLINE_CNN": {
@@ -18,7 +18,7 @@
     "activation": "relu",
     "batch_norm": true,
     "global_feat": false,
-    "pos_encoding": false,
+    "pos_encoding": true,
     "n_lap_EigVec": 8
   },
   "train_sampling": "intersection",
@@ -27,16 +27,16 @@
   "RANDOM_SEED": 123,
   "warmstart_path": null,
   "TRAIN": {
-    "EPOCH_ITERS": 5,
+    "EPOCH_ITERS": 2000,
     "LR": 0.0002,
-    "lr_schedule": "minirun",
-    "clip_norm": 0.1,
+    "lr_schedule": "long_halving3",
+    "clip_norm": 0,
     "weight_decay": 0,
     "num_graphs_in_matching_instance": 2,
     "random_swap": false,
     "AR": true
   },
-  "STATISTIC_STEP": 10,
+  "STATISTIC_STEP": 4,
   "TRACK_GRAD_NORM": false,
   "visualize": false,
   "visualization_params": {

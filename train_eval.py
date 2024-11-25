@@ -39,7 +39,7 @@ lr_schedules = {
     #TODO: CHANGE BACK TO 10
     "long_halving1": (32, (4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
     "long_halving2": (40, (8, 22, 35), 0.1),
-    "long_halving3": (32, (6, 21, 28), 0.5),
+    "long_halving3": (32, (6, 17, 29), 0.5),
     # "long_halving": (30, (3, 6, 12, 26), 0.25),
     # "long_halving": (50, (40,), 0.1),
     "short_halving": (2, (1,), 0.5),
@@ -163,6 +163,30 @@ def cosine_norm(x, dim=-1):
         norm = torch.norm(x, p=2, dim=dim, keepdim=True).clamp(min=1e-6)
         # divide by the magnitude to place on the unit hypersphere
         return x / norm
+    
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class HypersphericalPrototypeLoss(nn.Module):
+    def __init__(self):
+        super(HypersphericalPrototypeLoss, self).__init__()
+
+    def forward(self, cosine_similarity, prototype_score):
+        """
+        Compute the hyperspherical prototype loss.
+        """
+        
+        
+        ident_matrix = torch.eye(prototype_score.shape[1]).to(prototype_score.device)
+        prototype_score = prototype_score - 2 * ident_matrix
+        prototype_score_max, _ = torch.max(prototype_score, dim=-1)
+        prototype_score_max = prototype_score_max.reshape(-1)
+        
+        # Compute the loss (1 - cosine similarity)^2
+        loss = torch.sum((1 - cosine_similarity) ** 2) + torch.mean(prototype_score_max)
+        return loss
+
 def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epochs, local_rank, resume=False, start_epoch=0):
     
     
@@ -302,7 +326,9 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 # forward
                 
                 # target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
-                similarity_scores = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
+                similarity_scores, prototype_score = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
+                
+                
                 
                 # target_points = cosine_norm(target_points)
                 
@@ -333,7 +359,12 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 y_values = perm_mat_list[0].masked_select(expanded_mask).view(-1, perm_mat_list[0].size(2))
                 y_values_ = torch.argmax(y_values, dim=1)
                 
-                loss = criterion(similarity_scores, y_values_)
+                
+                # print(similarity_scores[y_values_])
+                batch_indices = torch.arange(similarity_scores.size(0), device=similarity_scores.device)
+                true_class_similarities = similarity_scores[batch_indices, y_values_]
+                
+                loss = criterion(true_class_similarities, prototype_score)
                 
                 
                 # pred_index = torch.argmax(F.softmax(similarity_scores), dim=1)
@@ -341,7 +372,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 
                 # for k in range(len(pred_index)):
                 #     pred_mat[k,pred_index[k]] = 1
-                # loss /= y_values.shape[0]
+                loss /= y_values.shape[0]
 
                 # backward + optimize
                 loss.backward()
@@ -411,7 +442,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         # eval_pred_points=None,
         # in_training=True
                     # target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list,  n_points_gt_sample, perm_mat_list, eval_pred_points=eval_pred_points, in_training= True)
-                    similarity_scores = model(data_list, points_gt_list, edges_list, n_points_gt_list,  n_points_gt_sample, perm_mat_list, eval_pred_points=eval_pred_points, in_training= True)
+                    similarity_scores, _ = model(data_list, points_gt_list, edges_list, n_points_gt_list,  n_points_gt_sample, perm_mat_list, eval_pred_points=eval_pred_points, in_training= True)
                     # target_points = cosine_norm(target_points)
                     # batch_size = model_output.size()[0]
                     # num_points1 = model_output.size()[1]
@@ -514,10 +545,10 @@ if __name__ == "__main__":
     cfg = update_params_from_cmdline(default_params=cfg)
     
     #windows
-    dist.init_process_group(backend='gloo', init_method='env://')
+    # dist.init_process_group(backend='gloo', init_method='env://')
     
     #linux
-    # dist.init_process_group(backend='nccl', init_method='env://')
+    dist.init_process_group(backend='nccl', init_method='env://')
     
     local_rank = int(os.environ['LOCAL_RANK']) 
     
@@ -581,7 +612,7 @@ if __name__ == "__main__":
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
     # criterion = torch.nn.BCEWithLogitsLoss()
-    criterion = torch.nn.CrossEntropyLoss()
+    criterion = HypersphericalPrototypeLoss()
     # criterion = torch.nn.BCELoss()
 
     # print(model)
