@@ -39,7 +39,7 @@ lr_schedules = {
     #TODO: CHANGE BACK TO 10
     "long_halving1": (32, (4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
     "long_halving2": (40, (8, 22, 35), 0.1),
-    "long_halving3": (32, (6, 19, 28), 0.5),
+    "long_halving3": (32, (6, 21, 28), 0.5),
     # "long_halving": (30, (3, 6, 12, 26), 0.25),
     # "long_halving": (50, (40,), 0.1),
     "short_halving": (2, (1,), 0.5),
@@ -301,12 +301,15 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
             with torch.set_grad_enabled(True):
                 # forward
                 
-                target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
+                # target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
+                similarity_scores = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
                 
                 # target_points = cosine_norm(target_points)
                 
-                batch_size = model_output.size()[0]
-                num_points1 = model_output.size()[1]
+                batch_size = similarity_scores.shape[0]
+                num_points1 = similarity_scores.shape[1]
+                # batch_size = model_output.size()[0]
+                # num_points1 = model_output.size()[1]
                 total_loss = 0
                 total_cosine_similarities = []
                 
@@ -314,16 +317,16 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                     perm_mat_list[0][idx, e:, :] = 0
                 
                 
-                for b in range(batch_size):
-                    batch_loss = 0
-                    batch_cosine_similarities = []
-                    for i in range(num_points1):
-                        # Compute cosine similarity of model_output[b, i] with all points in target_points[b]
-                        cosine_similarities = F.cosine_similarity(model_output[b, i].unsqueeze(0), target_points[b])
-                        batch_cosine_similarities.append(cosine_similarities)
-                    total_cosine_similarities.append(torch.stack(batch_cosine_similarities))
-                total_cosine_similarities = torch.stack(total_cosine_similarities).to(model_output.device)
-                similarity_scores = torch.atanh(total_cosine_similarities)
+                # for b in range(batch_size):
+                #     batch_loss = 0
+                #     batch_cosine_similarities = []
+                #     for i in range(num_points1):
+                #         # Compute cosine similarity of model_output[b, i] with all points in target_points[b]
+                #         cosine_similarities = F.cosine_similarity(model_output[b, i].unsqueeze(0), target_points[b])
+                #         batch_cosine_similarities.append(cosine_similarities)
+                #     total_cosine_similarities.append(torch.stack(batch_cosine_similarities))
+                # total_cosine_similarities = torch.stack(total_cosine_similarities).to(model_output.device)
+                # similarity_scores = torch.atanh(total_cosine_similarities)
                 has_one = perm_mat_list[0].sum(dim=2) != 0
                 expanded_mask = has_one.unsqueeze(-1).expand_as(perm_mat_list[0])
                 similarity_scores = similarity_scores.masked_select(expanded_mask).view(-1, perm_mat_list[0].size(2))
@@ -407,17 +410,22 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         # perm_mats,
         # eval_pred_points=None,
         # in_training=True
-                    target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list,  n_points_gt_sample, perm_mat_list, eval_pred_points=eval_pred_points, in_training= True)
+                    # target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list,  n_points_gt_sample, perm_mat_list, eval_pred_points=eval_pred_points, in_training= True)
+                    similarity_scores = model(data_list, points_gt_list, edges_list, n_points_gt_list,  n_points_gt_sample, perm_mat_list, eval_pred_points=eval_pred_points, in_training= True)
                     # target_points = cosine_norm(target_points)
-                    batch_size = model_output.size()[0]
-                    num_points1 = model_output.size()[1]
+                    # batch_size = model_output.size()[0]
+                    # num_points1 = model_output.size()[1]
+                    batch_size = similarity_scores.shape[0]
+                    num_points1 = similarity_scores.shape[1]
+                    keypoint_preds = F.softmax(similarity_scores, dim=-1)
+                    keypoint_preds = torch.argmax(keypoint_preds, dim=-1)
                     for b in range(batch_size):
-                        cosine_similarities = F.cosine_similarity(model_output[b, eval_pred_points].unsqueeze(0), target_points[b])
-                        cosine_similarities = torch.atanh(cosine_similarities)
-                        cosine_scores = F.softmax(cosine_similarities, dim=-1)
-                        cosine_matchings = torch.argmax(cosine_scores, dim=-1)
+                        # cosine_similarities = F.cosine_similarity(model_output[b, eval_pred_points].unsqueeze(0), target_points[b])
+                        # cosine_similarities = torch.atanh(cosine_similarities)
+                        # cosine_scores = F.softmax(cosine_similarities, dim=-1)
+                        # cosine_matchings = torch.argmax(cosine_scores, dim=-1)
                         if eval_pred_points < n_points_gt_sample[b]:
-                            predictions_list[b].append(cosine_matchings.item())
+                            predictions_list[b].append(keypoint_preds[b][eval_pred_points].item())
                         else:
                             predictions_list[b].append(-1)
                     

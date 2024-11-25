@@ -139,6 +139,8 @@ class MatchARNet(utils.backbone.VGG16_bn):
         self.mlp_out_2 = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, l2_scaling=True)
         # self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, batch_norm=False)
         # self.mlp_out_2 = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, batch_norm=False)
+        self.w_cosine = PairwiseWeightedCosineSimilarity(cfg.Matching_TF.d_model)
+        
         self.global_state_dim = 1024
 
         # matched encoding
@@ -301,6 +303,8 @@ class MatchARNet(utils.backbone.VGG16_bn):
         #                                   tgt_key_padding_mask=tgt_padding_mask) # TODO: tgt_key_padding_mask=query_mask ?
         
         
+        co_sim = self.w_cosine(dec_output, target_points)
+        sim_score = torch.atanh(co_sim)
         
         #TODO: test if with MLP and batchnorm or not / leave out mlp
         # print(decoder_output)
@@ -310,7 +314,7 @@ class MatchARNet(utils.backbone.VGG16_bn):
         # norm = torch.norm(target_points, p=2, dim=-1, keepdim=True).clamp(min=1e-6)
         # target_points = self.cosine_norm(target_points)
         # target_points /= norm
-        return target_points, dec_output
+        return sim_score#target_points, dec_output
         
 
 
@@ -382,7 +386,36 @@ class MLPQuery(nn.Module):
 
 
 
-class BilinearMLP(nn.Module):
-    def __init__(self, input_dim, output_dim):
-        self.biLin = nn.Bilinear(input_dim, input_dim, output_dim)
+class PairwiseWeightedCosineSimilarity(nn.Module):
+    def __init__(self, node_feature_dim):
+        super(PairwiseWeightedCosineSimilarity, self).__init__()
+        # Initialize weights with ones for each feature dimension
+        self.w = nn.Parameter(torch.ones(1, 1, node_feature_dim))
+    
+    def forward(self, x, y):
+        # x and y have shape [batch_size, nodes, node_feature]
+        
+        # Apply weights
+        x_weighted = x * self.w  # Shape: [batch_size, nodes_x, node_feature]
+        y_weighted = y * self.w  # Shape: [batch_size, nodes_y, node_feature]
+        
+        # Compute pairwise dot products
+        y_weighted_transposed = y_weighted.transpose(1, 2)  # Shape: [batch_size, node_feature, nodes_y]
+        numerator = torch.bmm(x_weighted, y_weighted_transposed)  # Shape: [batch_size, nodes_x, nodes_y]
+        
+        # Compute norms
+        x_norm = torch.norm(x_weighted, p=2, dim=2)  # Shape: [batch_size, nodes_x]
+        y_norm = torch.norm(y_weighted, p=2, dim=2)  # Shape: [batch_size, nodes_y]
+        epsilon = 1e-8  # To prevent division by zero
+        x_norm = x_norm + epsilon
+        y_norm = y_norm + epsilon
+        
+        # Compute outer product of norms
+        denominator = torch.bmm(x_norm.unsqueeze(2), y_norm.unsqueeze(1))  # Shape: [batch_size, nodes_x, nodes_y]
+        
+        # Compute cosine similarity matrix
+        cosine_similarity = numerator / denominator  # Shape: [batch_size, nodes_x, nodes_y]
+        cosine_similarity = torch.clamp(cosine_similarity, -1 + epsilon, 1 - epsilon)
+        
+        return cosine_similarity
         

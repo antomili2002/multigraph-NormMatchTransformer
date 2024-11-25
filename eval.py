@@ -113,18 +113,23 @@ def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
                     
                 for np in range(N_t):
                     
-                    target_points, model_output = model(data_list, points_gt, edges, n_points_gt,  perm_mat_list, n_points_sample, eval_pred_points, in_training= False)
+                    # target_points, model_output = model(data_list, points_gt, edges, n_points_gt,  perm_mat_list, n_points_sample, eval_pred_points, in_training= False)
+                    similarity_scores = model(data_list, points_gt, edges, n_points_gt,  perm_mat_list, n_points_sample, eval_pred_points, in_training= False)
                     # target_points = cosine_norm(target_points)
                     
-                    batch_size = model_output.size()[0]
-                    num_points1 = model_output.size()[1]
+                    # batch_size = model_output.size()[0]
+                    # num_points1 = model_output.size()[1]
+                    batch_size = similarity_scores.shape[0]
+                    num_points1 = similarity_scores.shape[1]
+                    keypoint_preds = F.softmax(similarity_scores, dim=-1)
+                    keypoint_preds = torch.argmax(keypoint_preds, dim=-1)
                     for b in range(batch_size):
-                        cosine_similarities = F.cosine_similarity(model_output[b, eval_pred_points].unsqueeze(0), target_points[b])
-                        cosine_similarities = torch.atanh(cosine_similarities)
-                        cosine_scores = F.softmax(cosine_similarities, dim=-1)
-                        cosine_matchings = torch.argmax(cosine_scores, dim=-1)
+                        # cosine_similarities = F.cosine_similarity(model_output[b, eval_pred_points].unsqueeze(0), target_points[b])
+                        # cosine_similarities = torch.atanh(cosine_similarities)
+                        # cosine_scores = F.softmax(cosine_similarities, dim=-1)
+                        # cosine_matchings = torch.argmax(cosine_scores, dim=-1)
                         if eval_pred_points < n_points_gt[0][b]:
-                            predictions_list[b].append(cosine_matchings.item())
+                            predictions_list[b].append(keypoint_preds[b][eval_pred_points].item())
                         else:
                             predictions_list[b].append(-1)
                     
