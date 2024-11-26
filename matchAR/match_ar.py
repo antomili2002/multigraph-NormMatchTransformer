@@ -262,10 +262,11 @@ class MatchARNet(utils.backbone.VGG16_bn):
                 # h_t[idx, e:, :] = 0
             
         
-        S_mask = ~torch.cat((s_mask, t_mask), dim=1)
-        input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
+        # S_mask = ~torch.cat((s_mask, t_mask), dim=1)
+        # input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
         # input = torch.cat((h_s, h_t), dim=1)
-        
+        S_mask = ~t_mask
+        input = h_t
         # encoder_output = self.tf_encoder(src=input, src_key_padding_mask=S_mask)
         encoder_output = self.n_gpt_encoder(input, S_mask)
         
@@ -273,11 +274,11 @@ class MatchARNet(utils.backbone.VGG16_bn):
         sample_size_each = encoder_output.size()[1] // 2 #Get the amount of concatenated points
         
         #split context sensitiv output from encoder into source and target patches
-        source_points = encoder_output[:, :sample_size_each, :].to(encoder_output.device)
-        target_points = encoder_output[:, sample_size_each:, :].to(encoder_output.device)
+        # source_points = encoder_output[:, :sample_size_each, :].to(encoder_output.device)
+        # target_points = encoder_output[:, sample_size_each:, :].to(encoder_output.device)
         
-        batch_size, seq_len, _ = source_points.size()
-        source_points_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1).to(source_points.device)#(1 - torch.triu(torch.ones((batch_size, sample_size_each, sample_size_each)), diagonal=1)).bool()
+        batch_size, seq_len, _ = h_s.shape
+        source_points_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1).to(h_s.device)#(1 - torch.triu(torch.ones((batch_size, sample_size_each, sample_size_each)), diagonal=1)).bool()
         # print(source_points.size())
         # print(source_points_mask.shape)
         # print(target_points.size(), target_points)
@@ -289,7 +290,7 @@ class MatchARNet(utils.backbone.VGG16_bn):
                 if eval_pred_points < n_points[0][i]:
                     tgt_padding_mask[i,:eval_pred_points+1] = 0        
         
-        dec_output = self.n_gpt_decoder(source_points, source_points_mask, target_points)
+        dec_output = self.n_gpt_decoder(h_s, source_points_mask, encoder_output)
         
         # print(dec_output.shape, dec_output)
         # br
@@ -303,10 +304,10 @@ class MatchARNet(utils.backbone.VGG16_bn):
         #                                   tgt_key_padding_mask=tgt_padding_mask) # TODO: tgt_key_padding_mask=query_mask ?
         
         
-        co_sim = self.w_cosine(dec_output, target_points)
+        co_sim = self.w_cosine(dec_output, encoder_output)
         sim_score = co_sim#torch.atanh(co_sim)
         
-        prototype_score = torch.bmm(target_points, target_points.transpose(1, 2))
+        prototype_score = torch.bmm(encoder_output, encoder_output.transpose(1, 2))
         
         #TODO: test if with MLP and batchnorm or not / leave out mlp
         # print(decoder_output)
@@ -392,32 +393,32 @@ class PairwiseWeightedCosineSimilarity(nn.Module):
     def __init__(self, node_feature_dim):
         super(PairwiseWeightedCosineSimilarity, self).__init__()
         # Initialize weights with ones for each feature dimension
-        self.w = nn.Parameter(torch.ones(1, 1, node_feature_dim))
+        # self.w = nn.Parameter(torch.ones(1, 1, node_feature_dim))
     
     def forward(self, x, y):
         # x and y have shape [batch_size, nodes, node_feature]
         
         # Apply weights
-        x_weighted = x * self.w  # Shape: [batch_size, nodes_x, node_feature]
-        y_weighted = y * self.w  # Shape: [batch_size, nodes_y, node_feature]
+        x_weighted = x #* self.w  # Shape: [batch_size, nodes_x, node_feature]
+        y_weighted = y #* self.w  # Shape: [batch_size, nodes_y, node_feature]
         
         # Compute pairwise dot products
         y_weighted_transposed = y_weighted.transpose(1, 2)  # Shape: [batch_size, node_feature, nodes_y]
         numerator = torch.bmm(x_weighted, y_weighted_transposed)  # Shape: [batch_size, nodes_x, nodes_y]
         
         # Compute norms
-        x_norm = torch.norm(x_weighted, p=2, dim=2)  # Shape: [batch_size, nodes_x]
-        y_norm = torch.norm(y_weighted, p=2, dim=2)  # Shape: [batch_size, nodes_y]
-        epsilon = 1e-8  # To prevent division by zero
-        x_norm = x_norm + epsilon
-        y_norm = y_norm + epsilon
+        x_norm = torch.norm(x_weighted, p=2, dim=2).clamp(min=1e-6)  # Shape: [batch_size, nodes_x]
+        y_norm = torch.norm(y_weighted, p=2, dim=2).clamp(min=1e-6)  # Shape: [batch_size, nodes_y]
+        #epsilon = 1e-8  # To prevent division by zero
+        #x_norm = x_norm + epsilon
+        #y_norm = y_norm + epsilon
         
         # Compute outer product of norms
         denominator = torch.bmm(x_norm.unsqueeze(2), y_norm.unsqueeze(1))  # Shape: [batch_size, nodes_x, nodes_y]
         
         # Compute cosine similarity matrix
         cosine_similarity = numerator / denominator  # Shape: [batch_size, nodes_x, nodes_y]
-        cosine_similarity = torch.clamp(cosine_similarity, -1 + epsilon, 1 - epsilon)
+        #cosine_similarity = torch.clamp(cosine_similarity, -1 + epsilon, 1 - epsilon)
         
         return cosine_similarity
         

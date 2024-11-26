@@ -37,7 +37,7 @@ class HammingLoss(torch.nn.Module):
 
 lr_schedules = {
     #TODO: CHANGE BACK TO 10
-    "long_halving1": (32, (4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.5),
+    "long_halving1": (32, (4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.7),
     "long_halving2": (40, (8, 22, 35), 0.1),
     "long_halving3": (32, (6, 17, 29), 0.5),
     # "long_halving": (30, (3, 6, 12, 26), 0.25),
@@ -164,15 +164,12 @@ def cosine_norm(x, dim=-1):
         # divide by the magnitude to place on the unit hypersphere
         return x / norm
     
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-class HypersphericalPrototypeLoss(nn.Module):
+class HypersphericalPrototypeLoss(torch.nn.Module):
     def __init__(self):
         super(HypersphericalPrototypeLoss, self).__init__()
+        self.crossEntropy = torch.nn.CrossEntropyLoss()
 
-    def forward(self, cosine_similarity, prototype_score):
+    def forward(self, cosine_similarity, prototype_score, similarity_scores, y_values_):
         """
         Compute the hyperspherical prototype loss.
         """
@@ -184,7 +181,8 @@ class HypersphericalPrototypeLoss(nn.Module):
         prototype_score_max = prototype_score_max.reshape(-1)
         
         # Compute the loss (1 - cosine similarity)^2
-        loss = torch.sum((1 - cosine_similarity) ** 2) + torch.mean(prototype_score_max)
+        # loss = torch.sum((1 - cosine_similarity) ** 2) + torch.mean(prototype_score_max)
+        loss = self.crossEntropy(similarity_scores, y_values_) + torch.mean(prototype_score_max)
         return loss
 
 def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epochs, local_rank, resume=False, start_epoch=0):
@@ -364,7 +362,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 batch_indices = torch.arange(similarity_scores.size(0), device=similarity_scores.device)
                 true_class_similarities = similarity_scores[batch_indices, y_values_]
                 
-                loss = criterion(true_class_similarities, prototype_score)
+                loss = criterion(true_class_similarities, prototype_score, similarity_scores, y_values_)
                 
                 
                 # pred_index = torch.argmax(F.softmax(similarity_scores), dim=1)
@@ -372,7 +370,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 
                 # for k in range(len(pred_index)):
                 #     pred_mat[k,pred_index[k]] = 1
-                loss /= y_values.shape[0]
+                # loss /= y_values.shape[0]
 
                 # backward + optimize
                 loss.backward()
