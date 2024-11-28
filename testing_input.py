@@ -4,27 +4,17 @@ import torch
 import torch.nn as nn
 
 # Sample input
-import torch
-import torch.nn as nn
+t1 = torch.triu(torch.ones(8, 8, dtype=torch.bool), diagonal=1)
+print(t1)
+t2 = ~torch.triu(torch.ones(8, 8, dtype=torch.bool), diagonal=0)
+print(t2)
+t3 = t1 + t2
+print(t3)
+current_pos = 3
+for i in range(current_pos):
+    t3[i:,i] = False
 
-# Example raw and query patch embeddings
-Z_raw = torch.randn(10, 64)  # 10 raw patches, 64-dimensional embeddings
-Z_key = torch.randn(5, 64)   # 5 query patches, 64-dimensional embeddings
-
-# Learnable weight matrix for bilinear operation
-W = nn.Parameter(torch.randn(64, 64))
-
-# Compute bilinear features
-Z_bilinear = torch.matmul(Z_key, W)  # Shape: (10, 64)
-Z_bilinear = torch.matmul(Z_bilinear, Z_raw.T)  # Shape: (10, 5)
-
-W2 = nn.Parameter(torch.randn(10, 64))
-
-Z_bilinear = torch.matmul(Z_bilinear, W2)
-# Concatenate with query embeddings (expand query features to match dimensions)
-#Z_combined = torch.cat([Z_bilinear, Z_key.expand_as(Z_bilinear)], dim=-1)
-
-print(Z_bilinear.shape)  # Final shape would be (10, 5, 128)
+print(t3)
 # Attention matrix: [batch, seq_len, seq_len]
 # nested_dict = {
 #     1: {

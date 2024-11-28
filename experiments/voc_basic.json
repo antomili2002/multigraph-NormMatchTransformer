@@ -27,7 +27,7 @@
   "RANDOM_SEED": 123,
   "warmstart_path": null,
   "TRAIN": {
-    "EPOCH_ITERS": 2000,
+    "EPOCH_ITERS": 2,
     "LR": 0.0002,
     "lr_schedule": "long_halving3",
     "clip_norm": 0,

@@ -34,6 +34,15 @@ class HammingLoss(torch.nn.Module):
         errors = suggested * (1.0 - target) + (1.0 - suggested) * target
         return errors.mean(dim=0).sum()
 
+class InfoNCE_Loss(torch.nn.Module):
+    def __init__(self):
+        super(InfoNCE_Loss, self).__init__()
+    def forward(self, similarity_tensor, pos_indices, temperature=0.1):
+        Batch_size, nodes1, nodes2 = similarity_tensor.shape
+        similarities = similarity_tensor.view(Batch_size * nodes1, nodes2)
+        logits = similarities / temperature
+        loss = F.cross_entropy(logits, pos_indices)
+        return loss
 
 lr_schedules = {
     #TODO: CHANGE BACK TO 10
@@ -357,7 +366,6 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 y_values = perm_mat_list[0].masked_select(expanded_mask).view(-1, perm_mat_list[0].size(2))
                 y_values_ = torch.argmax(y_values, dim=1)
                 
-                
                 # print(similarity_scores[y_values_])
                 batch_indices = torch.arange(similarity_scores.size(0), device=similarity_scores.device)
                 true_class_similarities = similarity_scores[batch_indices, y_values_]
@@ -543,10 +551,10 @@ if __name__ == "__main__":
     cfg = update_params_from_cmdline(default_params=cfg)
     
     #windows
-    # dist.init_process_group(backend='gloo', init_method='env://')
+    dist.init_process_group(backend='gloo', init_method='env://')
     
     #linux
-    dist.init_process_group(backend='nccl', init_method='env://')
+    # dist.init_process_group(backend='nccl', init_method='env://')
     
     local_rank = int(os.environ['LOCAL_RANK']) 
     
@@ -611,6 +619,7 @@ if __name__ == "__main__":
 
     # criterion = torch.nn.BCEWithLogitsLoss()
     criterion = HypersphericalPrototypeLoss()
+    # criterion = InfoNCE_Loss()
     # criterion = torch.nn.BCELoss()
 
     # print(model)

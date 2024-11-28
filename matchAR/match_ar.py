@@ -262,23 +262,22 @@ class MatchARNet(utils.backbone.VGG16_bn):
                 # h_t[idx, e:, :] = 0
             
         
-        # S_mask = ~torch.cat((s_mask, t_mask), dim=1)
-        # input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
+       
+        S_mask = ~torch.cat((s_mask, t_mask), dim=1)
+        input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
         # input = torch.cat((h_s, h_t), dim=1)
-        S_mask = ~t_mask
-        input = h_t
         # encoder_output = self.tf_encoder(src=input, src_key_padding_mask=S_mask)
-        encoder_output = self.n_gpt_encoder(input, S_mask)
+        encoder_output, encoder_memory = self.n_gpt_encoder(input, S_mask)
         
         
-        sample_size_each = encoder_output.size()[1] // 2 #Get the amount of concatenated points
+        sample_size_each = encoder_memory.size()[1] // 2 #Get the amount of concatenated points
         
         #split context sensitiv output from encoder into source and target patches
-        # source_points = encoder_output[:, :sample_size_each, :].to(encoder_output.device)
-        # target_points = encoder_output[:, sample_size_each:, :].to(encoder_output.device)
+        source_points = encoder_memory[:, :sample_size_each, :].to(encoder_memory.device)
+        target_points = encoder_memory[:, sample_size_each:, :].to(encoder_memory.device)
         
-        batch_size, seq_len, _ = h_s.shape
-        source_points_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1).to(h_s.device)#(1 - torch.triu(torch.ones((batch_size, sample_size_each, sample_size_each)), diagonal=1)).bool()
+        batch_size, seq_len, _ = source_points.shape
+        source_points_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1).to(source_points.device)#(1 - torch.triu(torch.ones((batch_size, sample_size_each, sample_size_each)), diagonal=1)).bool()
         # print(source_points.size())
         # print(source_points_mask.shape)
         # print(target_points.size(), target_points)
@@ -290,7 +289,7 @@ class MatchARNet(utils.backbone.VGG16_bn):
                 if eval_pred_points < n_points[0][i]:
                     tgt_padding_mask[i,:eval_pred_points+1] = 0        
         
-        dec_output = self.n_gpt_decoder(h_s, source_points_mask, encoder_output)
+        dec_output = self.n_gpt_decoder(source_points, source_points_mask, target_points)
         
         # print(dec_output.shape, dec_output)
         # br
@@ -303,7 +302,7 @@ class MatchARNet(utils.backbone.VGG16_bn):
         #                                   tgt_mask=source_points_mask,
         #                                   tgt_key_padding_mask=tgt_padding_mask) # TODO: tgt_key_padding_mask=query_mask ?
         
-        
+        encoder_output = encoder_output[:, sample_size_each:, :].to(encoder_output.device)
         co_sim = self.w_cosine(dec_output, encoder_output)
         sim_score = co_sim#torch.atanh(co_sim)
         

@@ -384,9 +384,9 @@ class NGPT_ENCODER(nn.Module):
         self.layers = nn.ModuleList(Layer(cfg) for _ in range(cfg.num_layers))
 
         # the output projection
-        # self.output = nn.Linear(cfg.dim, self.vocab_len, bias=False, device=self.device)
+        self.output = nn.Linear(cfg.dim, cfg.dim, bias=False, device=self.device)
         # scaling param to un-limit the range for the final probability distribution (see page 2)
-        # self.s_z = Scale(self.vocab_len, scale = 1./math.sqrt(self.dim), device=self.device)
+        self.s_z = Scale(cfg.dim, scale = 1./math.sqrt(self.dim), device=self.device)
 
         # loss function
         # self.criterion = nn.CrossEntropyLoss(ignore_index = self.vocab_len -1) # ignore the padding token
@@ -490,9 +490,10 @@ class NGPT_ENCODER(nn.Module):
         
         # the final output of the model
         logits = x#self.output(x) # (batch_size, seq_len, vocab_len)
+        logits_memory = self.output(x)
+        scaled_logits_memory = logits_memory * self.s_z()
         
-        
-        return logits
+        return logits, scaled_logits_memory
         # to un-limit the temperature of the final probability distribution (see page 2)
         
         #EDIT
