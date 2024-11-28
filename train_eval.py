@@ -37,10 +37,10 @@ class HammingLoss(torch.nn.Module):
 class InfoNCE_Loss(torch.nn.Module):
     def __init__(self):
         super(InfoNCE_Loss, self).__init__()
-    def forward(self, similarity_tensor, pos_indices, temperature=0.1):
-        Batch_size, nodes1, nodes2 = similarity_tensor.shape
-        similarities = similarity_tensor.view(Batch_size * nodes1, nodes2)
-        logits = similarities / temperature
+    def forward(self, similarity_tensor, pos_indices, temperature=0.5):
+        #Batch_size, nodes1, nodes2 = similarity_tensor.shape
+        # similarities = similarity_tensor.view(Batch_size * nodes1, nodes2)
+        logits = similarity_tensor / temperature
         loss = F.cross_entropy(logits, pos_indices)
         return loss
 
@@ -48,7 +48,7 @@ lr_schedules = {
     #TODO: CHANGE BACK TO 10
     "long_halving1": (32, (4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.7),
     "long_halving2": (40, (8, 22, 35), 0.1),
-    "long_halving3": (32, (6, 17, 29), 0.5),
+    "long_halving3": (32, (14, 18), 0.1),
     # "long_halving": (30, (3, 6, 12, 26), 0.25),
     # "long_halving": (50, (40,), 0.1),
     "short_halving": (2, (1,), 0.5),
@@ -366,11 +366,15 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 y_values = perm_mat_list[0].masked_select(expanded_mask).view(-1, perm_mat_list[0].size(2))
                 y_values_ = torch.argmax(y_values, dim=1)
                 
+                
                 # print(similarity_scores[y_values_])
                 batch_indices = torch.arange(similarity_scores.size(0), device=similarity_scores.device)
                 true_class_similarities = similarity_scores[batch_indices, y_values_]
                 
-                loss = criterion(true_class_similarities, prototype_score, similarity_scores, y_values_)
+                # loss = criterion(true_class_similarities, prototype_score, similarity_scores, y_values_)
+               
+                loss = criterion(similarity_scores, y_values_)
+                #def forward(self, similarity_tensor, pos_indices, temperature=0.1):
                 
                 
                 # pred_index = torch.argmax(F.softmax(similarity_scores), dim=1)
@@ -415,8 +419,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                     for name, param in model.named_parameters():
                         if "n_gpt_decoder" in name:  # Check if the parameter belongs to the excluded module
                             continue
-                        if "n_gpt_encoder" in name:
-                            continue
+                        #if "n_gpt_encoder" in name:
+                        #    continue
                         elif param.grad is not None:
                             torch.nn.utils.clip_grad_norm_(param, max_norm)# Skip excluded parameters
                 #TODO: Clip without Decoder layer
@@ -424,7 +428,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 optimizer.step()
 
                 model.module.n_gpt_decoder.enforce_constraints()
-                model.module.n_gpt_encoder.enforce_constraints() 
+                #model.module.n_gpt_encoder.enforce_constraints() 
                 
             with torch.no_grad():
                 matchings = []
@@ -538,9 +542,6 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
             
         scheduler.step()
         
-        
-        
-    print(all_error_dict)
     
     
     return model, all_error_dict
@@ -551,10 +552,10 @@ if __name__ == "__main__":
     cfg = update_params_from_cmdline(default_params=cfg)
     
     #windows
-    dist.init_process_group(backend='gloo', init_method='env://')
+    # dist.init_process_group(backend='gloo', init_method='env://')
     
     #linux
-    # dist.init_process_group(backend='nccl', init_method='env://')
+    dist.init_process_group(backend='nccl', init_method='env://')
     
     local_rank = int(os.environ['LOCAL_RANK']) 
     
@@ -618,8 +619,8 @@ if __name__ == "__main__":
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
     # criterion = torch.nn.BCEWithLogitsLoss()
-    criterion = HypersphericalPrototypeLoss()
-    # criterion = InfoNCE_Loss()
+    # criterion = HypersphericalPrototypeLoss()
+    criterion = InfoNCE_Loss()
     # criterion = torch.nn.BCELoss()
 
     # print(model)
@@ -632,7 +633,7 @@ if __name__ == "__main__":
 
     new_params = [param for param in model.parameters() if id(param) not in backbone_ids]
     opt_params = [
-        dict(params=backbone_params, lr=cfg.TRAIN.LR * 0.01),
+        dict(params=backbone_params, lr=cfg.TRAIN.LR * 0.05),
         dict(params=new_params, lr=cfg.TRAIN.LR),
     ]
     optimizer = optim.RAdam(opt_params, weight_decay=cfg.TRAIN.weight_decay) #, weight_decay=1e-5

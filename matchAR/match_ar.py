@@ -15,7 +15,7 @@ from utils.utils import lexico_iter
 from utils.evaluation_metric import make_perm_mat_pred
 from utils.visualization import easy_visualize
 from matchAR.nGPT_decoder import NGPT_DECODER
-from matchAR.nGPT_encoder import NGPT_ENCODER
+# from matchAR.nGPT_encoder import NGPT_ENCODER
 
 
 def normalize_over_channels(x):
@@ -86,6 +86,21 @@ def create_source_masks(source_points, n_points, max_length=40):
 
     return source_points_mask, source_key_padding_mask
 
+def cosine_norm(x: torch.Tensor, dim=-1) -> torch.Tensor:
+    """
+    Places vectors onto the unit-hypersphere
+
+    Args:
+        x (torch.Tensor): Input tensor.
+
+    Returns:
+        torch.Tensor: Normalized tensor.
+    """
+    # calculate the magnitude of the vectors
+    norm = torch.norm(x, p=2, dim=dim, keepdim=True).clamp(min=1e-6)
+    # divide by the magnitude to place on the unit hypersphere
+    return x / norm
+
 class ModelConfig:
     """
     Design your N-GPT here
@@ -128,12 +143,12 @@ class MatchARNet(utils.backbone.VGG16_bn):
         nGPT_decoder_config.mlp_hidden_mult  = 4
         self.n_gpt_decoder = NGPT_DECODER(nGPT_decoder_config)
         
-        nGPT_encoder_config = ModelConfig()
-        nGPT_encoder_config.dim = cfg.Matching_TF.d_model
-        nGPT_encoder_config.num_layers = cfg.Matching_TF.n_encoder
-        nGPT_encoder_config.num_heads = cfg.Matching_TF.n_head # number of heads in the multi-head attention mechanism
-        nGPT_encoder_config.mlp_hidden_mult  = 4
-        self.n_gpt_encoder = NGPT_ENCODER(nGPT_encoder_config)
+        #nGPT_encoder_config = ModelConfig()
+        #nGPT_encoder_config.dim = cfg.Matching_TF.d_model
+        #nGPT_encoder_config.num_layers = cfg.Matching_TF.n_encoder
+        #nGPT_encoder_config.num_heads = cfg.Matching_TF.n_head # number of heads in the multi-head attention mechanism
+        #nGPT_encoder_config.mlp_hidden_mult  = 4
+        #self.n_gpt_encoder = NGPT_ENCODER(nGPT_encoder_config)
         
         self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, l2_scaling=True)
         self.mlp_out_2 = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, l2_scaling=True)
@@ -262,22 +277,24 @@ class MatchARNet(utils.backbone.VGG16_bn):
                 # h_t[idx, e:, :] = 0
             
         
-       
-        S_mask = ~torch.cat((s_mask, t_mask), dim=1)
-        input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
+        # print(s_mask.shape, s_mask)
+        # print(h_s.shape, h_s)
+        # br
+        # S_mask = ~torch.cat((s_mask, t_mask), dim=1)
+        # input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
         # input = torch.cat((h_s, h_t), dim=1)
         # encoder_output = self.tf_encoder(src=input, src_key_padding_mask=S_mask)
-        encoder_output, encoder_memory = self.n_gpt_encoder(input, S_mask)
+        #encoder_output, encoder_memory = self.n_gpt_encoder(input, S_mask)
         
         
-        sample_size_each = encoder_memory.size()[1] // 2 #Get the amount of concatenated points
+        #sample_size_each = encoder_memory.size()[1] // 2 #Get the amount of concatenated points
         
         #split context sensitiv output from encoder into source and target patches
-        source_points = encoder_memory[:, :sample_size_each, :].to(encoder_memory.device)
-        target_points = encoder_memory[:, sample_size_each:, :].to(encoder_memory.device)
+        #source_points = encoder_memory[:, :sample_size_each, :].to(encoder_memory.device)
+        #target_points = encoder_memory[:, sample_size_each:, :].to(encoder_memory.device)
         
-        batch_size, seq_len, _ = source_points.shape
-        source_points_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1).to(source_points.device)#(1 - torch.triu(torch.ones((batch_size, sample_size_each, sample_size_each)), diagonal=1)).bool()
+        batch_size, seq_len, _ = h_s.shape
+        source_points_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1).to(h_s.device)#(1 - torch.triu(torch.ones((batch_size, sample_size_each, sample_size_each)), diagonal=1)).bool()
         # print(source_points.size())
         # print(source_points_mask.shape)
         # print(target_points.size(), target_points)
@@ -289,7 +306,7 @@ class MatchARNet(utils.backbone.VGG16_bn):
                 if eval_pred_points < n_points[0][i]:
                     tgt_padding_mask[i,:eval_pred_points+1] = 0        
         
-        dec_output = self.n_gpt_decoder(source_points, source_points_mask, target_points)
+        dec_output = self.n_gpt_decoder(h_s, source_points_mask, h_t)
         
         # print(dec_output.shape, dec_output)
         # br
@@ -302,11 +319,11 @@ class MatchARNet(utils.backbone.VGG16_bn):
         #                                   tgt_mask=source_points_mask,
         #                                   tgt_key_padding_mask=tgt_padding_mask) # TODO: tgt_key_padding_mask=query_mask ?
         
-        encoder_output = encoder_output[:, sample_size_each:, :].to(encoder_output.device)
-        co_sim = self.w_cosine(dec_output, encoder_output)
+        h_t_norm = cosine_norm(h_t)
+        co_sim = self.w_cosine(dec_output, h_t_norm)
         sim_score = co_sim#torch.atanh(co_sim)
         
-        prototype_score = torch.bmm(encoder_output, encoder_output.transpose(1, 2))
+        prototype_score = torch.bmm(h_t_norm, h_t_norm.transpose(1, 2))
         
         #TODO: test if with MLP and batchnorm or not / leave out mlp
         # print(decoder_output)
