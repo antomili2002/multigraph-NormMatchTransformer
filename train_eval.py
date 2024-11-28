@@ -37,7 +37,7 @@ class HammingLoss(torch.nn.Module):
 class InfoNCE_Loss(torch.nn.Module):
     def __init__(self):
         super(InfoNCE_Loss, self).__init__()
-    def forward(self, similarity_tensor, pos_indices, temperature=0.5):
+    def forward(self, similarity_tensor, pos_indices, temperature=0.2):
         #Batch_size, nodes1, nodes2 = similarity_tensor.shape
         # similarities = similarity_tensor.view(Batch_size * nodes1, nodes2)
         logits = similarity_tensor / temperature

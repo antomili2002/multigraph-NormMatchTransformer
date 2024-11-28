@@ -186,6 +186,12 @@ class MatchARNet(utils.backbone.VGG16_bn):
         return new_queries
     
     
+    def update_order(self, source_nodes, input_order):
+        B, _, _ = source_nodes.shape
+        for b in range(B):
+            source_nodes[b, :, :] = source_nodes[b, input_order[b], :]
+        return source_nodes
+    
 
     def forward(
         self,
@@ -196,7 +202,8 @@ class MatchARNet(utils.backbone.VGG16_bn):
         n_points_sample, 
         perm_mats,
         eval_pred_points=None,
-        in_training=True
+        in_training=True,
+        input_order=None
     ):
         batch_size = graphs[0].num_graphs
         global_list = []
@@ -299,12 +306,20 @@ class MatchARNet(utils.backbone.VGG16_bn):
         # print(source_points_mask.shape)
         # print(target_points.size(), target_points)
         # print(source_points.size(),source_points)
-        tgt_padding_mask = torch.zeros((batch_size, seq_len), dtype=torch.bool).to(source_points_mask.device)
-        if eval_pred_points is not None:
-            tgt_padding_mask = torch.ones((batch_size, seq_len), dtype=torch.bool).to(source_points_mask.device)
-            for i in range(batch_size):
-                if eval_pred_points < n_points[0][i]:
-                    tgt_padding_mask[i,:eval_pred_points+1] = 0        
+        # tgt_padding_mask = torch.zeros((batch_size, seq_len), dtype=torch.bool).to(source_points_mask.device)
+        # if eval_pred_points is not None:
+        #     tgt_padding_mask = torch.ones((batch_size, seq_len), dtype=torch.bool).to(source_points_mask.device)
+        #     for i in range(batch_size):
+        #         if eval_pred_points < n_points[0][i]:
+        #             tgt_padding_mask[i,:eval_pred_points+1] = 0    
+        if in_training == False:
+            h_s = self.update_order(h_s, input_order)
+            diagonal_mask = ~torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=0).to(h_s.device)
+            res_mask = source_points_mask + diagonal_mask
+            for j in range(eval_pred_points):
+                res_mask[j:,j] = False
+            
+            
         
         dec_output = self.n_gpt_decoder(h_s, source_points_mask, h_t)
         

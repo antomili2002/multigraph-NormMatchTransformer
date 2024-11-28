@@ -4,17 +4,37 @@ import torch
 import torch.nn as nn
 
 # Sample input
-t1 = torch.triu(torch.ones(8, 8, dtype=torch.bool), diagonal=1)
-print(t1)
-t2 = ~torch.triu(torch.ones(8, 8, dtype=torch.bool), diagonal=0)
-print(t2)
-t3 = t1 + t2
-print(t3)
-current_pos = 3
-for i in range(current_pos):
-    t3[i:,i] = False
+# t1 = torch.triu(torch.ones(8, 8, dtype=torch.bool), diagonal=1)
+# print(t1)
+# t2 = ~torch.triu(torch.ones(8, 8, dtype=torch.bool), diagonal=0)
+# print(t2)
+# t3 = t1 + t2
+# print(t3)
+# current_pos = 3
+# for i in range(current_pos):
+#     t3[i:,i] = False
+# b = torch.arange(12).unsqueeze(0).expand(2, -1)
+# print(b)
+# br
+# print(t3)
+t1 = torch.tensor([[[2,3,4], [4,4, 4], [8,8,8]],[[1, 1, 1],[2,2,2], [0,0,0]]])
+# print(t1.shape, t1)
+# t1 = torch.rand([2, 10, 10])
+# print(t1.shape, t1)
+t2 = torch.tensor([[1, 0, 2],[1, 2, 0]])
+print(t2.shape, t2)
+for i in range(2):
+    t1[i, :, :] = t1[i, t2[i], :]
 
-print(t3)
+print(t1)
+# batch_size = t1.shape[0]
+
+# # torch.max(t1[0], dim=-1)
+# max_e, max_i = torch.max(t1[0], dim=-1)
+# print(max_e, max_i)
+# maxxx_e, maxxx_i = torch.max(max_e, dim=-1)
+# print(maxxx_e, maxxx_i)
+# print(torch.max(torch.max(t1[0], dim=-1)[0]))
 # Attention matrix: [batch, seq_len, seq_len]
 # nested_dict = {
 #     1: {

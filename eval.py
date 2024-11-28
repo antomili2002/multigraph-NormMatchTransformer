@@ -108,13 +108,16 @@ def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
                 eval_pred_points = 0
                 j_pred = 0
                 predictions_list = []
+                # keypoint_order = []
                 for _ in range(B):
                     predictions_list.append([])
+                    # keypoint_order.append([])
                     
+                input_order = torch.arange(N_t).unsqueeze(0).expand(B, -1).to(device)
                 for np in range(N_t):
                     
                     # target_points, model_output = model(data_list, points_gt, edges, n_points_gt,  perm_mat_list, n_points_sample, eval_pred_points, in_training= False)
-                    similarity_scores, _ = model(data_list, points_gt, edges, n_points_gt,  perm_mat_list, n_points_sample, eval_pred_points, in_training= False)
+                    similarity_scores, _ = model(data_list, points_gt, edges, n_points_gt,  perm_mat_list, n_points_sample, eval_pred_points, in_training= False, input_order=input_order)
                     # target_points = cosine_norm(target_points)
                     
                     # batch_size = model_output.size()[0]
@@ -122,18 +125,36 @@ def eval_model(model, dataloader, local_rank, eval_epoch=None, verbose=True):
                     batch_size = similarity_scores.shape[0]
                     num_points1 = similarity_scores.shape[1]
                     keypoint_preds = F.softmax(similarity_scores, dim=-1)
-                    keypoint_preds = torch.argmax(keypoint_preds, dim=-1)
+                    # keypoint_preds = torch.argmax(keypoint_preds, dim=-1)
                     for b in range(batch_size):
+                        #Max similarity scores between source and target nodes
+                        max_similarities, max_similarities_index = torch.max(keypoint_preds[b], dim=-1)
+                        #picking the best source-target match
+                        best_match, best_match_index = torch.max(max_similarities[eval_pred_points:], dim=-1)
+                        # print(max_similarities, max_similarities_index)
+                        # print(best_match, best_match_index)
+                        #to get the index from the original similarity index 
+                        best_source_index = best_match_index.item() + eval_pred_points
+                        
+                        best_pred_index = max_similarities_index[best_source_index].item()
+                        # print(best_source_index)
+                        # print(best_pred_index)
+                        # print(input_order)
+                        input_order[b, [eval_pred_points, best_source_index]] = input_order[b, [best_source_index, eval_pred_points]]
+                        # print(input_order)
+                        # keypoint_order[b].append(best_source_index)
                         # cosine_similarities = F.cosine_similarity(model_output[b, eval_pred_points].unsqueeze(0), target_points[b])
                         # cosine_similarities = torch.atanh(cosine_similarities)
                         # cosine_scores = F.softmax(cosine_similarities, dim=-1)
                         # cosine_matchings = torch.argmax(cosine_scores, dim=-1)
                         if eval_pred_points < n_points_gt[0][b]:
-                            predictions_list[b].append(keypoint_preds[b][eval_pred_points].item())
+                            predictions_list[b].append(best_pred_index)
                         else:
                             predictions_list[b].append(-1)
                     
                     eval_pred_points +=1
+                for bat in range(B):
+                    perm_mat_list[0][bat, :, :] = perm_mat_list[0][bat, input_order[b, :], :]
                 prediction_tensor = torch.tensor(predictions_list).to(perm_mat_list[0].device)
                 y_values_matching = torch.argmax(perm_mat_list[0], dim=-1)
                 batch_correct, batch_total_valid = calculate_correct_and_valid(prediction_tensor, y_values_matching)
