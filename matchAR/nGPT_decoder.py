@@ -139,7 +139,9 @@ class SelfAttention(nn.Module):
     def forward(self,
         x: torch.Tensor,
         # freqs: dict = None,
-        mask: torch.Tensor = None
+        mask: torch.Tensor = None,
+        freqs = None,
+        is_eval = False
     ) -> torch.Tensor:
         """
         Forward pass for the self-attention module.
@@ -164,10 +166,10 @@ class SelfAttention(nn.Module):
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim)
 
         # applying RoPE
-        # sin = freqs['sin'][:, :seq_len, :, :].to(self.device) 
-        # cos = freqs['cos'][:, :seq_len, :, :].to(self.device) # (1, seq_len, 1, head_dim // 2)
-        # q = self.apply_rotary_pos_emb(q, sin, cos) # no shape change
-        # k = self.apply_rotary_pos_emb(k, sin, cos)
+        sin = freqs['sin'][:, :seq_len, :, :].to(self.device) 
+        cos = freqs['cos'][:, :seq_len, :, :].to(self.device) # (1, seq_len, 1, head_dim // 2)
+        q = self.apply_rotary_pos_emb(q, sin, cos) # no shape change
+        k = self.apply_rotary_pos_emb(k, sin, cos)
 
         # normalizing & scaling our queries  & keys (see page 4)
         s_qk = self.s_qk() # (num_heads, head_dim)
@@ -181,18 +183,24 @@ class SelfAttention(nn.Module):
         
         # Compute attention logits (compare queries & keys)
         logits = (q @ k.transpose(-2, -1)) * self.scale # (batch_size, num_heads, seq_len, seq_len)
-        
+        logits = logits.to(mask.device)
         # here we mask out all the future-values
-        logits = logits.masked_fill(mask, float('-inf'))  # (batch_size, num_heads, seq_len, seq_len)
+        if is_eval == True:
+            mask = mask.unsqueeze(1)
+            
+        logits = logits.masked_fill(mask, -1e9)
+        
+        
+        
 
         # Compute attention scores (grab the relevant values that correspond to the attention logits)
         scores =  F.softmax(logits, dim=-1) @ v # (batch_size, n_heads, seq_len, head_dim)
-
         # Combine heads
         scores = scores.transpose(1, 2).contiguous().view(batch_size, seq_len, -1) 
             # (batch_size, seq_len, n_heads * head_dim)
+        out = self.Wo(scores)
         
-        return self.Wo(scores) # (batch_size, seq_len, dim)
+        return out # (batch_size, seq_len, dim)
     
     def apply_rotary_pos_emb(
         self, 
@@ -268,8 +276,7 @@ class CrossAttention(nn.Module):
     def forward(self,
         x: torch.Tensor,
         memory: torch.Tensor,
-        # freqs: dict = None,
-        mask: torch.Tensor = None
+        padding_mask
     ) -> torch.Tensor:
         """
         Forward pass for the self-attention module.
@@ -311,9 +318,13 @@ class CrossAttention(nn.Module):
         
         # Compute attention logits (compare queries & keys)
         logits = (q @ k.transpose(-2, -1)) * self.scale # (batch_size, num_heads, seq_len, seq_len)
-            
+        
+        
+        padding_mask = padding_mask.unsqueeze(1)
+        
+        
         # here we mask out all the future-values
-        logits = logits.masked_fill(mask, float('-inf'))  # (batch_size, num_heads, seq_len, seq_len)
+        logits = logits.masked_fill(padding_mask, -1e9)
 
         # Compute attention scores (grab the relevant values that correspond to the attention logits)
         scores =  F.softmax(logits, dim=-1) @ v # (batch_size, n_heads, seq_len, head_dim)
@@ -352,7 +363,7 @@ class MLP(nn.Module):
         self.Wdown = nn.Linear(hidden_dim, output_dim, bias=False, device=self.device)
 
         # this flag designates Wdown to have a different parameter initialization as defined in model.py
-        self.Wdown.GPT_scale_init = 1 
+        self.Wdown.GPT_scale_init = 0
 
         # the learnable scaling factors
         self.s_u = Scale(hidden_dim, device=device)
@@ -401,21 +412,25 @@ class Layer(nn.Module):
         ### attention connection
         self.attn = SelfAttention(cfg.dim, cfg.num_heads, self.device)
         # eigen learning rate vector
-        self.alpha_A = Scale(cfg.dim, init = 0.05, scale = 1. / math.sqrt(cfg.dim), device=self.device)
+        self.alpha_A = Scale(cfg.dim, init = 0.05, scale = 1. / math.sqrt(cfg.dim), device=self.device) #init= 0.05
             # not sure what scale to use with a_A and a_M. At one point i had it as 1./math.sqrt(cfg.dim)
             # but now i can't find the reference to that in the paper
 
         #EDIT
         self.cross_attn = CrossAttention(cfg.dim, cfg.num_heads, self.device)
-        self.alpha_C = Scale(cfg.dim, init = 0.05, scale = 1. / math.sqrt(cfg.dim), device=self.device)
+        self.alpha_C = Scale(cfg.dim, init = 0.05, scale = 1. / math.sqrt(cfg.dim), device=self.device) #init= 0.05
+        
+        #For Global feature information exchange
+        self.alpha_G = Scale(cfg.dim, init = 0.05, scale = 1. / math.sqrt(cfg.dim), device=self.device) #init= 0.05
+        
         ### feedforward connection
         # ensures mlp_hidden_mult maintains the same parameter count as if we were using a not-gated MLP
         mult = cfg.mlp_hidden_mult * 2/3
         self.mlp = MLP(cfg.dim, int(cfg.dim * mult),  cfg.dim, self.device)
         # eigen learning rate vector
-        self.alpha_M = Scale(cfg.dim, init = 0.05, scale = 1. / math.sqrt(cfg.dim), device=self.device)
+        self.alpha_M = Scale(cfg.dim, init = 0.05, scale = 1. / math.sqrt(cfg.dim), device=self.device) #init= 0.05
         
-    def forward(self, h: torch.Tensor, m: torch.Tensor, mask: torch.Tensor) -> torch.Tensor: #freqs: dict, 
+    def forward(self, h: torch.Tensor, m: torch.Tensor, mask: torch.Tensor, padding_mask, freqs, is_eval) -> torch.Tensor: #freqs: dict, 
         """
         Forward pass of the Layer module.
 
@@ -432,17 +447,20 @@ class Layer(nn.Module):
         # print(m.shape, m)
         # print(mask.shape, mask)
         # print("--------------------------------")
-        h_A = cosine_norm(self.attn(h, mask)) #freqs, 
+        h_A = cosine_norm(self.attn(h, mask, freqs, is_eval)) #freqs, 
         h = cosine_norm(h + self.alpha_A() * (h_A - h))
         # print(h_A.shape, h_A)
         # print(h.shape, h)
         # print("--------------------------------")
         
         #EDIT
-        h_C = cosine_norm(self.cross_attn(h, m, mask))#freqs, 
+        h_C = cosine_norm(self.cross_attn(h, m, padding_mask))#freqs, 
         h = cosine_norm(h + self.alpha_C() * (h_C - h))
         # print(h.shape, h)
         # print("--------------------------------")
+        global_feat = h[:,0,:]
+        h_G = cosine_norm(h * global_feat.unsqueeze(1))
+        h = cosine_norm(h + self.alpha_G() * (h_G - h))
         
         
         h_M = cosine_norm(self.mlp(h))
@@ -468,7 +486,7 @@ class NGPT_DECODER(nn.Module):
         # self.vocab_len = cfg.vocab_len
 
         ### positional encodings
-        # self.precompute_freqs = PrecomputeRotaryFrequencies(cfg.dim // cfg.num_heads, cfg.max_seq_len, cfg.theta, self.device)
+        self.precompute_freqs = PrecomputeRotaryFrequencies(cfg.dim // cfg.num_heads, cfg.dim, device = self.device)
 
         # residual state initialization
         # self.token_embedder = nn.Embedding(self.vocab_len, cfg.dim, device=self.device)
@@ -541,6 +559,7 @@ class NGPT_DECODER(nn.Module):
         for layer in self.layers:
             layer.alpha_A.s.data.abs_()
             layer.alpha_C.s.data.abs_()
+            layer.alpha_G.s.data.abs_()
             layer.alpha_M.s.data.abs_()
         
         # Cosine normalize relevant Linear layers
@@ -561,7 +580,9 @@ class NGPT_DECODER(nn.Module):
         self, 
         source_nodes: torch.Tensor, 
         mask: torch.Tensor,
+        padding_mask,
         encoder_output: torch.Tensor = None,
+        is_eval = False,
     ) -> (torch.Tensor):
         """
         Our N-GPT's primary forward function that calls all the other modules
@@ -577,7 +598,7 @@ class NGPT_DECODER(nn.Module):
         # mask = self.mask[:seq_len, :seq_len]
 
         # precomputing our RoPE frequencies
-        # freqs = self.precompute_freqs() 
+        freqs = self.precompute_freqs() 
             # dict {'sin': shape (1, max_seq_len, 1, head_dim), 'cos': shape (1, max_seq_len, 1, head_dim)}
       
         # initializing the first residual state
@@ -585,7 +606,7 @@ class NGPT_DECODER(nn.Module):
         x = source_nodes
         # run through the model's layers
         for layer in self.layers:
-            x = layer(x, encoder_output, mask)
+            x = layer(x, encoder_output, mask, padding_mask, freqs, is_eval)
         
         # the final output of the model
         logits = x#self.output(x) # (batch_size, seq_len, vocab_len)

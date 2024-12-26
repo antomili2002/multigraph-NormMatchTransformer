@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
@@ -28,27 +29,285 @@ from utils.evaluation_metric import calculate_correct_and_valid, calculate_f1_sc
 
 
 
+class GS_InfoNCE_Loss(torch.nn.Module):
+    def __init__(self, temperature, noise_scale, lambda_balance):
+        
+        super(GS_InfoNCE_Loss, self).__init__()
+        self.temperature = temperature
+        self.noise_scale = noise_scale
+        self.lambda_balance = lambda_balance
 
-class HammingLoss(torch.nn.Module):
-    def forward(self, suggested, target):
-        errors = suggested * (1.0 - target) + (1.0 - suggested) * target
-        return errors.mean(dim=0).sum()
+    def forward(self, source_Points, target_Points, pos_indices, n_points):
+        
+        device = source_Points.device
+        batch_size, num_points, feature_size = source_Points.shape
+        
+        sim_numerator = torch.bmm(source_Points, target_Points.transpose(1, 2))
+        
+        source_normed = torch.norm(source_Points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(2)
+        target_normed = torch.norm(target_Points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(1)
+        sim_denominator = torch.bmm(source_normed, target_normed)
+        
+        cosine_sim = sim_numerator / sim_denominator
+        
+        sim_tensor = []
+        for i in range(batch_size):
+            sim_tensor.append(cosine_sim[i, :n_points[i], :])
+        
+        sim_tensor = torch.concat(sim_tensor, dim=0).to(device)
+        
+        pos_idx_mask = torch.zeros((sim_tensor.shape[0], sim_tensor.shape[1]), dtype=torch.bool).to(sim_tensor.device)
+        rows = torch.arange(sim_tensor.shape[0]).to(sim_tensor.device)
+        pos_idx_mask[rows, pos_indices] = 1
+        
+        pos_score = torch.masked_select(sim_tensor, pos_idx_mask).reshape(-1, 1)
+        pos_score = pos_score / self.temperature
+        pos_score = torch.exp(pos_score)
+        
+        trans_cosine_sim = cosine_sim #.transpose(1, 2)
+        trans_sim_tensor = []
+        for i in range(batch_size):
+            trans_sim_tensor.append(trans_cosine_sim[i, :n_points[i], :])
+        trans_sim_tensor = torch.concat(trans_sim_tensor, dim=0).to(device)
+        
+        trans_sim_tensor = trans_sim_tensor / self.temperature
+        trans_sim_tensor = torch.exp(trans_sim_tensor)
+        trans_sim_tensor_sum = torch.sum(trans_sim_tensor, dim=-1).reshape(-1, 1)
+        
+        
+        noise_vectors = torch.normal(
+            mean=0.0,
+            std=self.noise_scale,
+            size=(batch_size*2, feature_size)
+        ).to(device)
+        
+        filtered_source_points = []
+        for i in range(batch_size):
+            filtered_source_points.append(source_Points[i, :n_points[i], :])
+        filtered_source_points = torch.concat(filtered_source_points, dim=0).to(device)
+            
+        filtered_source_points_normed = torch.norm(filtered_source_points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(1)
+        noise_vectors_normed = torch.norm(noise_vectors, p=2, dim=-1).clamp(min=1e-8).unsqueeze(0)
+        
+        noise_numerator = torch.matmul(filtered_source_points, noise_vectors.transpose(0, 1))
+        noise_denominator = torch.matmul(filtered_source_points_normed, noise_vectors_normed)
+        
+        noise_term = noise_numerator / noise_denominator
+        noise_term = noise_term / self.temperature
+        noise_term = torch.exp(noise_term)
+        noise_term_sum = torch.sum(noise_term, dim=-1).reshape(-1, 1)
+        noise_term_sum = self.lambda_balance * noise_term_sum
+        
+        loss = -torch.log(pos_score / (trans_sim_tensor_sum + noise_term_sum))
+        loss = torch.mean(loss)
+        
+        source_sim_numer = torch.bmm(source_Points, source_Points.transpose(1, 2))
+        source_sim_normed1 = torch.norm(source_Points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(2)
+        source_sim_normed2 = torch.norm(source_Points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(1)
+        source_sim_denominator = torch.bmm(source_sim_normed1, source_sim_normed2)
+        source_cosine_sim = source_sim_numer / source_sim_denominator
+        
+        
+        target_sim_numer = torch.bmm(target_Points, target_Points.transpose(1, 2))
+        target_sim_normed1 = torch.norm(target_Points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(2)
+        target_sim_normed2 = torch.norm(target_Points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(1)
+        target_sim_denominator = torch.bmm(target_sim_normed1, target_sim_normed2)
+        target_cosine_sim = target_sim_numer / target_sim_denominator
+        
+        ident_mat = torch.eye(source_cosine_sim.shape[1]).to(device)
+        source_cosine_sim = source_cosine_sim - 2 * ident_mat
+        target_cosine_sim = target_cosine_sim - 2 * ident_mat
+        
+        source_prot_score_max, _ = torch.max(source_cosine_sim, dim=-1)
+        source_prot_score_mean = torch.mean(source_prot_score_max, dim=-1)
+        source_prot_score_sum = torch.sum(source_prot_score_mean)
+        
+        target_prot_score_max, _ = torch.max(target_cosine_sim, dim=-1)
+        target_prot_score_mean = torch.mean(target_prot_score_max, dim=-1)
+        target_prot_score_sum = torch.sum(target_prot_score_mean)
+        
+        end_loss = loss + source_prot_score_sum + target_prot_score_sum
+        return end_loss
+
+class RINCE2(torch.nn.Module):
+    def __init__(self, q, lambd, temperature):
+        super(RINCE2, self).__init__()
+        self.q = q
+        self.lambd = lambd
+        self.temperature = temperature
+    def forward(self, similarity_tensor, pos_indices, prototype_score):
+        pos_scores_mask = torch.zeros(similarity_tensor.shape, dtype=torch.bool).to(similarity_tensor.device)
+        rows = torch.arange(similarity_tensor.shape[0]).to(similarity_tensor.device)
+        pos_scores_mask[rows, pos_indices] = 1
+        pos_scores = similarity_tensor[pos_scores_mask]
+        negative_scores_mask = ~pos_scores_mask
+        negative_scores = similarity_tensor[negative_scores_mask].reshape(similarity_tensor.shape[0], similarity_tensor.shape[1]-1)
+        
+        
+        numerator1 = torch.exp(pos_scores / self.temperature)
+        pos = -(numerator1**self.q) / self.q
+        
+        negative_scores = torch.exp(negative_scores / self.temperature)
+        negative_scores = torch.sum(negative_scores, dim=1)
+        neg = ((self.lambd * (numerator1+negative_scores))**self.q) / self.q
+        
+        
+        score_max_list = []
+        for t in prototype_score:
+            ident_matrix = torch.eye(t.shape[1]).to(t.device)
+            prototype_score = t - 2 * ident_matrix
+            prototype_score_max, _ = torch.max(prototype_score, dim=-1)
+            #prototype_score_max = torch.mean(prototype_score_max, dim=-1)
+            score_max_list.append(prototype_score_max)
+
+        score_max_tensor = torch.cat(score_max_list, dim=1)
+        
+        loss = pos.mean() + neg.mean() + torch.mean(score_max_tensor)
+        return loss
+
+class RINCE(torch.nn.Module):
+    def __init__(self, temperature_1, temperature_2):
+        super(RINCE, self).__init__()
+        self.temperature_1 = temperature_1
+        self.temperature_2 = temperature_2
+    def forward(self, similarity_tensor, pos_indices, all_classes, n_points): 
+        
+        first_pos_numer_mask = torch.zeros((similarity_tensor.shape[1], similarity_tensor.shape[2]), dtype=torch.bool).to(similarity_tensor.device)
+        rows = torch.arange(similarity_tensor.shape[1]).to(similarity_tensor.device)
+        first_pos_numer_mask[rows, pos_indices] = 1
+        
+        first_pos_numer = torch.zeros((similarity_tensor.shape[1])).to(similarity_tensor.device)
+        first_neg_denom = torch.zeros((similarity_tensor.shape[1])).to(similarity_tensor.device)
+        all_pos = []
+        all_negs = []
+        for i in range(similarity_tensor.shape[1]):
+            
+            all_pos.append(similarity_tensor[0, i, first_pos_numer_mask[i]])
+            all_pos_scaled = all_pos[i] / self.temperature_1
+            all_pos_exp = torch.exp(all_pos_scaled)
+            all_pos_summed = torch.sum(all_pos_exp)
+            first_pos_numer[i] = all_pos_summed
+            
+            all_negs.append(similarity_tensor[0, i, ~first_pos_numer_mask[i]])
+            all_negs_scaled = all_negs[i] / self.temperature_1
+            all_negs_exp = torch.exp(all_negs_scaled)
+            all_negs_summed = torch.sum(all_negs_exp)
+            first_neg_denom[i] = all_negs_summed
+           
+        
+        first_pos_denom_classes = torch.zeros((torch.sum(n_points)), dtype=torch.int).to(similarity_tensor.device)
+        class_dict = {}
+        dict_state = 0
+        for i in all_classes:
+            if i not in class_dict:
+                class_dict[i] = dict_state
+                dict_state += 1
+        curr = 0
+        for idx, e in enumerate(n_points):
+            if idx == 0:
+                first_pos_denom_classes[curr:e] = class_dict[all_classes[idx]]
+                continue
+                    
+            curr += n_points[idx-1]
+            first_pos_denom_classes[curr:curr+e] = class_dict[all_classes[idx]]
+            
+        first_pos_denom = torch.zeros((similarity_tensor.shape[1])).to(similarity_tensor.device)
+        second_pos_numer = torch.zeros((similarity_tensor.shape[1])).to(similarity_tensor.device)
+        second_neg_denom = torch.zeros((similarity_tensor.shape[1])).to(similarity_tensor.device)
+        
+        class_mask = torch.zeros((similarity_tensor.shape[1], similarity_tensor.shape[2]), dtype=torch.bool).to(similarity_tensor.device)
+        
+        for i in range(similarity_tensor.shape[1]):
+            current_class = first_pos_denom_classes[i]
+            class_mask[i] = torch.where(first_pos_denom_classes == current_class, 1, 0).bool()
+        
+        class_mask_2 = class_mask.clone()
+        # for i in range(similarity_tensor.shape[1]):
+        #     class_mask_2[i, pos_indices[i]] = 0
+            
+        for i in range(similarity_tensor.shape[1]):
+            # current_class = first_pos_denom_classes[i]
+            # class_mask = torch.where(first_pos_denom_classes == current_class, 1, 0).bool()
+            similarity_score = similarity_tensor[0, i, class_mask[i]]
+            similarity_score_ = similarity_score / self.temperature_1
+            sim_exp = torch.exp(similarity_score_)
+            sim_sum = torch.sum(sim_exp)
+            first_pos_denom[i] = sim_sum
+            
+            # class_mask_2 = class_mask
+            # class_mask_2[i, pos_indices[i]] = 0
+            similarity_score_2 = similarity_tensor[0, i, class_mask_2[i]]
+            similarity_score_2 = similarity_score_2 / self.temperature_2
+            sim_exp_2 = torch.exp(similarity_score_2)
+            sim_sum_2 = torch.sum(sim_exp_2)
+            second_pos_numer[i] = sim_sum_2
+            
+            neg_mask = ~class_mask_2
+            neg_sim_score = similarity_tensor[0, i, neg_mask[i]]
+            neg_sim_score = neg_sim_score / self.temperature_2
+            neg_sim_exp = torch.exp(neg_sim_score)
+            neg_sim_sum = torch.sum(neg_sim_exp)
+            second_neg_denom[i] = neg_sim_sum
+            
+            
+        first_denom = first_pos_denom + first_neg_denom
+        l_1 = -torch.log(first_pos_numer / first_denom)
+        
+        second_denom = second_pos_numer + first_neg_denom
+        l_2 = -torch.log(second_pos_numer / second_denom)
+        
+        l_sum = l_1 + l_2
+        return torch.mean(l_sum)
 
 class InfoNCE_Loss(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, temperature):
         super(InfoNCE_Loss, self).__init__()
-    def forward(self, similarity_tensor, pos_indices, temperature=0.2):
-        #Batch_size, nodes1, nodes2 = similarity_tensor.shape
-        # similarities = similarity_tensor.view(Batch_size * nodes1, nodes2)
-        logits = similarity_tensor / temperature
+        self.temperature = temperature
+    def forward(self, similarity_tensor, pos_indices, source_Points, target_Points): #, prototype_score
+        # score_max_list = []
+        # for t in prototype_score:
+        #     ident_matrix = torch.eye(t.shape[1]).to(t.device)
+        #     prototype_score = t - 2 * ident_matrix
+        #     prototype_score_max, _ = torch.max(prototype_score, dim=-1)
+        #     score_max_list.append(prototype_score_max)
+
+        # score_max_tensor = torch.cat(score_max_list, dim=1)
+        source_sim_numer = torch.bmm(source_Points, source_Points.transpose(1, 2))
+        source_sim_normed1 = torch.norm(source_Points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(2)
+        source_sim_normed2 = torch.norm(source_Points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(1)
+        source_sim_denominator = torch.bmm(source_sim_normed1, source_sim_normed2)
+        source_cosine_sim = source_sim_numer / source_sim_denominator
+        
+        
+        target_sim_numer = torch.bmm(target_Points, target_Points.transpose(1, 2))
+        target_sim_normed1 = torch.norm(target_Points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(2)
+        target_sim_normed2 = torch.norm(target_Points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(1)
+        target_sim_denominator = torch.bmm(target_sim_normed1, target_sim_normed2)
+        target_cosine_sim = target_sim_numer / target_sim_denominator
+        
+        ident_mat = torch.eye(source_cosine_sim.shape[1]).to(device)
+        source_cosine_sim = source_cosine_sim - 2 * ident_mat
+        target_cosine_sim = target_cosine_sim - 2 * ident_mat
+        
+        source_prot_score_max, _ = torch.max(source_cosine_sim, dim=-1)
+        source_prot_score_mean = torch.mean(source_prot_score_max, dim=-1)
+        source_prot_score_mean = torch.mean(source_prot_score_mean)
+        
+        target_prot_score_max, _ = torch.max(target_cosine_sim, dim=-1)
+        target_prot_score_mean = torch.mean(target_prot_score_max, dim=-1)
+        target_prot_score_mean = torch.mean(target_prot_score_mean)
+        
+        sim_score = similarity_tensor #torch.atanh(similarity_tensor)
+        logits = sim_score / self.temperature
         loss = F.cross_entropy(logits, pos_indices)
-        return loss
+        # print(loss + source_prot_score_mean + target_prot_score_mean)
+        return loss + source_prot_score_mean + target_prot_score_mean#+ torch.mean(score_max_tensor) #prot_loss
 
 lr_schedules = {
     #TODO: CHANGE BACK TO 10
-    "long_halving1": (32, (4, 6, 9, 10, 13, 16, 18, 20, 23, 26, 29), 0.7),
-    "long_halving2": (40, (8, 22, 35), 0.1),
-    "long_halving3": (32, (14, 18), 0.1),
+    "long_halving1": (32, (3, 8, 13, 20), 0.3),
+    "long_halving2": (32, (8,22), 0.1),
+    "long_halving3": (32, (32,), 0.1),
     # "long_halving": (30, (3, 6, 12, 26), 0.25),
     # "long_halving": (50, (40,), 0.1),
     "short_halving": (2, (1,), 0.5),
@@ -194,7 +453,34 @@ class HypersphericalPrototypeLoss(torch.nn.Module):
         loss = self.crossEntropy(similarity_scores, y_values_) + torch.mean(prototype_score_max)
         return loss
 
-def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epochs, local_rank, resume=False, start_epoch=0):
+def get_lr(it, learning_rate, min_lr=0.0, warmup_iters=10, lr_decay_iters=300000):
+    # 1) linear warmup for warmup_iters steps
+    if it < warmup_iters:
+        return learning_rate * it / warmup_iters
+    # 2) if it > lr_decay_iters, return min learning rate
+    if it > lr_decay_iters:
+        return min_lr
+    # 3) in between, use cosine decay down to min learning rate
+    decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
+    return min_lr + coeff * (learning_rate - min_lr)
+
+class RINCE2Scheduler:
+    def __init__(self, rince2_loss, start_q=0.01, end_q=0.25, num_epochs=16):
+        self.rince2_loss = rince2_loss
+        self.start_q = start_q
+        self.end_q = end_q
+        self.num_epochs = num_epochs
+        self.q_values = torch.linspace(start_q, end_q, num_epochs).tolist()
+        self.current_epoch = 0
+
+    def step(self):
+        if self.current_epoch < self.num_epochs:
+            self.rince2_loss.q = self.q_values[self.current_epoch]
+            self.current_epoch += 1
+
+def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epochs, local_rank, output_rank, resume=False, start_epoch=0):
     
     
     
@@ -205,7 +491,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
     
 
     device = next(model.parameters()).device
-    if local_rank == 0:
+    if local_rank == output_rank:
         print("Start training...")
         print("{} model on device: {}".format(cfg.MODEL_ARCH , device))
 
@@ -216,18 +502,18 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
     if resume:
         params_path = os.path.join(cfg.warmstart_path, f"params.pt")
         print("Loading model parameters from {}".format(params_path))
-        model.load_state_dict(torch.load(params_path))
+        model.load_state_dict(torch.load(params_path, map_location=f'cuda:{local_rank}'))
 
         optim_path = os.path.join(cfg.warmstart_path, f"optim.pt")
         print("Loading optimizer state from {}".format(optim_path))
-        optimizer.load_state_dict(torch.load(optim_path))
+        optimizer.load_state_dict(torch.load(optim_path, map_location=f'cuda:{local_rank}'))
 
     # Evaluation only
     if cfg.evaluate_only:
         # assert resume
-        if local_rank == 0:
+        if local_rank == output_rank:
             print(f"Evaluating without training...")
-            accs, f1_scores, error_dict = eval.eval_model(model, dataloader["test"], local_rank, eval_epoch=32)
+            accs, f1_scores, error_dict = eval.eval_model(model, dataloader["test"], local_rank, output_rank, eval_epoch=8)
             acc_dict = {
                 "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.classes, accs)
             }
@@ -256,14 +542,19 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
     all_error_dict = {}
     result_dict = {}
     
+    iter_num = 0
+    
+    # Initialize the RINCE2 scheduler
+    if isinstance(criterion, RINCE2):
+        rince2_scheduler = RINCE2Scheduler(criterion, start_q=cfg.TRAIN.rince_q, end_q=cfg.TRAIN.rince_q_end, num_epochs=24)
     
     for epoch in range(start_epoch, num_epochs):
-        if local_rank == 0:
+        if local_rank == output_rank:
             print("Epoch {}/{}".format(epoch, num_epochs - 1))
             print("-" * 10)
         model.train()  # Set model to training mode
 
-        if local_rank == 0:
+        if local_rank == output_rank:
             print("lr = " + ", ".join(["{:.2e}".format(x["lr"]) for x in optimizer.param_groups]))
 
         epoch_loss_2 = 0
@@ -274,7 +565,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         running_f1 = 0.0
         epoch_f1 = 0.0
         running_since = time.time()
-        iter_num = 0
+        
 
         # print(len(dataloader["train"]))
         # Iterate over data.
@@ -287,6 +578,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         modeL_parameter_list = list(model.parameters())
         # print(modeL_parameter_list[-1:])
         for inputs in dataloader["train"]:
+            all_classes = [_ for _ in inputs["cls"]]
+            # print(all_classes)
             data_list = [_.cuda() for _ in inputs["images"]]
             points_gt_list = [_.cuda() for _ in inputs["Ps"]]
             n_points_gt_list = [_.cuda() for _ in inputs["ns"]]
@@ -333,7 +626,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 # forward
                 
                 # target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
-                similarity_scores, prototype_score = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
+                similarity_scores, sim_scores_all, prototype_score, s_points, t_points = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
                 
                 
                 
@@ -341,25 +634,12 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 
                 batch_size = similarity_scores.shape[0]
                 num_points1 = similarity_scores.shape[1]
-                # batch_size = model_output.size()[0]
-                # num_points1 = model_output.size()[1]
-                total_loss = 0
-                total_cosine_similarities = []
+                
                 
                 for idx, e in enumerate(n_points_gt_sample):
                     perm_mat_list[0][idx, e:, :] = 0
                 
                 
-                # for b in range(batch_size):
-                #     batch_loss = 0
-                #     batch_cosine_similarities = []
-                #     for i in range(num_points1):
-                #         # Compute cosine similarity of model_output[b, i] with all points in target_points[b]
-                #         cosine_similarities = F.cosine_similarity(model_output[b, i].unsqueeze(0), target_points[b])
-                #         batch_cosine_similarities.append(cosine_similarities)
-                #     total_cosine_similarities.append(torch.stack(batch_cosine_similarities))
-                # total_cosine_similarities = torch.stack(total_cosine_similarities).to(model_output.device)
-                # similarity_scores = torch.atanh(total_cosine_similarities)
                 has_one = perm_mat_list[0].sum(dim=2) != 0
                 expanded_mask = has_one.unsqueeze(-1).expand_as(perm_mat_list[0])
                 similarity_scores = similarity_scores.masked_select(expanded_mask).view(-1, perm_mat_list[0].size(2))
@@ -367,24 +647,29 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 y_values_ = torch.argmax(y_values, dim=1)
                 
                 
-                # print(similarity_scores[y_values_])
-                batch_indices = torch.arange(similarity_scores.size(0), device=similarity_scores.device)
-                true_class_similarities = similarity_scores[batch_indices, y_values_]
-                
-                # loss = criterion(true_class_similarities, prototype_score, similarity_scores, y_values_)
                
-                loss = criterion(similarity_scores, y_values_)
-                #def forward(self, similarity_tensor, pos_indices, temperature=0.1):
+                loss = criterion(similarity_scores, y_values_, s_points, t_points) #, prototype_score
+                
+                # loss = criterion(s_points, t_points, y_values_, n_points_gt_list[0])
+                
+                # has_one = perm_mat_list[0].sum(dim=2) != 0
+                # expanded_mask = has_one.unsqueeze(-1).expand_as(perm_mat_list[0])
+                # has_one = has_one.reshape(has_one.shape[0] * has_one.shape[1])
+                # sim_scores_all = sim_scores_all[:,has_one, : ]
+                # sim_scores_all = sim_scores_all[:,:, has_one]
+                
+                # y_values = perm_mat_list[0].masked_select(expanded_mask).view(-1, perm_mat_list[0].size(2))
+                # y_values_ = torch.argmax(y_values, dim=1)
+                # count_ = 0
+                # for indx_, elem in enumerate(n_points_gt_list[0]):
+                #     if indx_ == 0:
+                #         continue
+                #     count_ += n_points_gt_list[0][indx_-1].item()
+                    
+                #     y_values_[count_:count_+elem] += count_
+                # loss = criterion(sim_scores_all, y_values_, all_classes, n_points_gt_list[0])
                 
                 
-                # pred_index = torch.argmax(F.softmax(similarity_scores), dim=1)
-                # pred_mat = torch.zeros_like(y_values)
-                
-                # for k in range(len(pred_index)):
-                #     pred_mat[k,pred_index[k]] = 1
-                # loss /= y_values.shape[0]
-
-                # backward + optimize
                 loss.backward()
                 #****************************************************************
                 #print(total_probabs)
@@ -417,18 +702,27 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                     
                 if max_norm > 0:
                     for name, param in model.named_parameters():
-                        if "n_gpt_decoder" in name:  # Check if the parameter belongs to the excluded module
-                            continue
-                        #if "n_gpt_encoder" in name:
+                        if param.grad is not None:
+                            torch.nn.utils.clip_grad_norm_(param, max_norm)
+                        # if "n_gpt_decoder" in name:  # Check if the parameter belongs to the excluded module
+                        #     continue
+                        # if "n_gpt_decoder_2" in name:
                         #    continue
-                        elif param.grad is not None:
-                            torch.nn.utils.clip_grad_norm_(param, max_norm)# Skip excluded parameters
-                #TODO: Clip without Decoder layer
+                        # elif param.grad is not None:
+                        #     torch.nn.utils.clip_grad_norm_(param, max_norm)# Skip excluded parameters
+                
+                
+                # lr = get_lr(iter_num, cfg.TRAIN.LR) if cfg.TRAIN.decay_lr else cfg.TRAIN.LR
+                
+                # for param_group in optimizer.param_groups:
+                #     param_group['lr'] = lr
             
                 optimizer.step()
 
-                model.module.n_gpt_decoder.enforce_constraints()
-                #model.module.n_gpt_encoder.enforce_constraints() 
+                
+                model.module.enforce_constraints()
+                # model.module.n_gpt_decoder.enforce_constraints()
+                # model.module.n_gpt_decoder_2.enforce_constraints()
                 
             with torch.no_grad():
                 matchings = []
@@ -452,7 +746,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         # eval_pred_points=None,
         # in_training=True
                     # target_points, model_output = model(data_list, points_gt_list, edges_list, n_points_gt_list,  n_points_gt_sample, perm_mat_list, eval_pred_points=eval_pred_points, in_training= True)
-                    similarity_scores, _ = model(data_list, points_gt_list, edges_list, n_points_gt_list,  n_points_gt_sample, perm_mat_list, eval_pred_points=eval_pred_points, in_training= True)
+                    similarity_scores, _, _, _, _ = model(data_list, points_gt_list, edges_list, n_points_gt_list,  n_points_gt_sample, perm_mat_list, eval_pred_points=eval_pred_points, in_training= True)
                     # target_points = cosine_norm(target_points)
                     # batch_size = model_output.size()[0]
                     # num_points1 = model_output.size()[1]
@@ -523,15 +817,17 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         epoch_loss = epoch_loss / dataset_size
         
         # print(result_dict)
-        if local_rank == 0:
-            wandb.log({"ep_loss": epoch_loss, "ep_acc": epoch_acc, "ep_f1": epoch_f1})
-            print(f'epoch loss: {epoch_loss}, epoch accuracy: {epoch_acc}, epoch f1_score: {epoch_f1}')
+        
         
         if (epoch+1) % cfg.STATISTIC_STEP == 0:
-            if local_rank == 0:
-                accs, f1_scores, error_dict = eval.eval_model(model, dataloader["test"], local_rank)
+            if local_rank == output_rank:
+                accs, f1_scores, error_dict = eval.eval_model(model, dataloader["test"], local_rank, output_rank)
                 all_error_dict[epoch+1] = error_dict
-                wandb.log({"mean test_acc": torch.mean(accs), "mean test_f1": torch.mean(f1_scores)})
+                wandb.log({"ep_loss": epoch_loss, "ep_acc": epoch_acc, "ep_f1": epoch_f1, "mean test_acc": torch.mean(accs), "mean test_f1": torch.mean(f1_scores)})
+        else:
+            if local_rank == output_rank:
+                wandb.log({"ep_loss": epoch_loss, "ep_acc": epoch_acc, "ep_f1": epoch_f1})
+                print(f'epoch loss: {epoch_loss}, epoch accuracy: {epoch_acc}, epoch f1_score: {epoch_f1}')
         
         if cfg.save_checkpoint:
             base_path = Path(checkpoint_path / "{:04}".format(epoch + 1))
@@ -542,6 +838,9 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
             
         scheduler.step()
         
+        # Update the RINCE2 q value after each epoch
+        if isinstance(criterion, RINCE2):
+            rince2_scheduler.step()
     
     
     return model, all_error_dict
@@ -558,6 +857,7 @@ if __name__ == "__main__":
     dist.init_process_group(backend='nccl', init_method='env://')
     
     local_rank = int(os.environ['LOCAL_RANK']) 
+    output_rank = 0
     
     import json
     import os
@@ -566,7 +866,7 @@ if __name__ == "__main__":
     with open(os.path.join(cfg.model_dir, "settings.json"), "w") as f:
         json.dump(cfg, f)
     
-    if local_rank == 0:
+    if local_rank == output_rank:
         wandb.init(
         # set the wandb project where this run will be logged
         project="matchAR",
@@ -584,7 +884,7 @@ if __name__ == "__main__":
 
     torch.manual_seed(cfg.RANDOM_SEED)
 
-    dataset_len = {"train": cfg.TRAIN.EPOCH_ITERS * cfg.BATCH_SIZE, "test": cfg.EVAL.SAMPLES}
+    dataset_len = {"train": cfg.TRAIN.EPOCH_ITERS * cfg.BATCH_SIZE, "test": cfg.EVAL.SAMPLES} # 
     image_dataset = {
         x: GMDataset(cfg.DATASET_NAME, sets=x, length=dataset_len[x], obj_resize=(256, 256)) for x in ("train", "test")
     }
@@ -618,26 +918,33 @@ if __name__ == "__main__":
     model = model.to(device)
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
+    # criterion = torch.nn.CrossEntropyLoss()
     # criterion = torch.nn.BCEWithLogitsLoss()
     # criterion = HypersphericalPrototypeLoss()
-    criterion = InfoNCE_Loss()
+    criterion = InfoNCE_Loss(temperature=cfg.TRAIN.temperature)
+    # criterion = GS_InfoNCE_Loss(cfg.TRAIN.temperature, 1, 1)
+    # criterion = RINCE(temperature_1=cfg.TRAIN.temperature, temperature_2=cfg.TRAIN.temperature_2)
+    # criterion = RINCE2(cfg.TRAIN.rince_q, cfg.TRAIN.rince_lambda, cfg.TRAIN.temperature)
     # criterion = torch.nn.BCELoss()
 
     # print(model)
     backbone_params = list(model.module.node_layers.parameters()) + list(model.module.edge_layers.parameters())
     # backbone_params += list(model.final_layers.parameters())
     
-    
 
     backbone_ids = [id(item) for item in backbone_params]
 
     new_params = [param for param in model.parameters() if id(param) not in backbone_ids]
     opt_params = [
-        dict(params=backbone_params, lr=cfg.TRAIN.LR * 0.05),
+        dict(params=backbone_params, lr=cfg.TRAIN.LR * 0.01),
         dict(params=new_params, lr=cfg.TRAIN.LR),
     ]
-    optimizer = optim.RAdam(opt_params, weight_decay=cfg.TRAIN.weight_decay) #, weight_decay=1e-5
-    # optimizer = optim.Adam(opt_params, weight_decay=1e-5)
+    # optimizer = optim.RAdam(opt_params, weight_decay=cfg.TRAIN.weight_decay) #, weight_decay=1e-5
+    optimizer = optim.Adam(opt_params, weight_decay=cfg.TRAIN.weight_decay)
+    
+    # optimizer = optim.Adam(opt_params, weight_decay=cfg.TRAIN.weight_decay, betas=(0.8, 0.98), eps=1e-7, amsgrad=False)
+    # optimizer = optim.Adam(opt_params, weight_decay=cfg.TRAIN.weight_decay, betas=(0.7, 0.95), eps=1e-6, amsgrad=True)
+    
 
     if not Path(cfg.model_dir).exists():
         Path(cfg.model_dir).mkdir(parents=True)
@@ -650,11 +957,12 @@ if __name__ == "__main__":
                                    cfg.TRAIN.clip_norm, 
                                    num_epochs=num_epochs,
                                    local_rank=local_rank,
+                                   output_rank = output_rank,
                                    resume=cfg.warmstart_path is not None, 
                                    start_epoch=0,
                                    )
     
-    if local_rank == 0:
+    if local_rank == output_rank:
         if all_error_dict is not None:
             output_folder = "errors"
             os.makedirs(output_folder, exist_ok=True)

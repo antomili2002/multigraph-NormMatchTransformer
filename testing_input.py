@@ -1,135 +1,83 @@
-
-
 import torch
-import torch.nn as nn
 
-# Sample input
-# t1 = torch.triu(torch.ones(8, 8, dtype=torch.bool), diagonal=1)
-# print(t1)
-# t2 = ~torch.triu(torch.ones(8, 8, dtype=torch.bool), diagonal=0)
-# print(t2)
-# t3 = t1 + t2
-# print(t3)
-# current_pos = 3
-# for i in range(current_pos):
-#     t3[i:,i] = False
-# b = torch.arange(12).unsqueeze(0).expand(2, -1)
-# print(b)
-# br
-# print(t3)
-t1 = torch.tensor([[[2,3,4], [4,4, 4], [8,8,8]],[[1, 1, 1],[2,2,2], [0,0,0]]])
-# print(t1.shape, t1)
-# t1 = torch.rand([2, 10, 10])
-# print(t1.shape, t1)
-t2 = torch.tensor([[1, 0, 2],[1, 2, 0]])
-print(t2.shape, t2)
-for i in range(2):
-    t1[i, :, :] = t1[i, t2[i], :]
+class GS_InfoNCE_Loss(torch.nn.Module):
+    def __init__(self, temperature, noise_scale, lambda_balance):
+        
+        super(GS_InfoNCE_Loss, self).__init__()
+        self.temperature = temperature
+        self.noise_scale = noise_scale
+        self.lambda_balance = lambda_balance
 
-print(t1)
-# batch_size = t1.shape[0]
-
-# # torch.max(t1[0], dim=-1)
-# max_e, max_i = torch.max(t1[0], dim=-1)
-# print(max_e, max_i)
-# maxxx_e, maxxx_i = torch.max(max_e, dim=-1)
-# print(maxxx_e, maxxx_i)
-# print(torch.max(torch.max(t1[0], dim=-1)[0]))
-# Attention matrix: [batch, seq_len, seq_len]
-# nested_dict = {
-#     1: {
-#         'aeroplane': {9: [2, torch.tensor([2, 2, 2, 2, 2, 2, 2, 2, 2], device='cuda:0', dtype=torch.int32)], 11: [2, torch.tensor([2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1], device='cuda:0', dtype=torch.int32)], 5: [2, torch.tensor([2, 2, 2, 2, 2, 2,  2, 2, 1, 1], device='cuda:0', dtype=torch.int32)]},
-#         'bicycle': {11: [2, torch.tensor([0, 2, 2, 2, 2, 2, 2, 2, 0, 0, 2], device='cuda:0', dtype=torch.int32)]},
-#         'bird': {5: [2, torch.tensor([2, 0, 0, 2, 2], device='cuda:0', dtype=torch.int32)]},
-#         # Rest of the data...
-#     }
-# }
-# # for main_key, sub_dict in nested_dict.items():
-# #     print(f"Main Key: {main_key}")
-# #     for category, inner_dict in sub_dict.items():
-# #         print(category)
-# k = sorted(nested_dict[1]["aeroplane"].items())
-
-
-# print(k)
-# l = k[-1]
-# print(l)
-
-# a = torch.tensor([2,4,8,2])
-# b = torch.tensor([0,1,0,2])
-
-# print(a/4)
-
-
-# t1 = torch.tensor([1, 1])
-# t2 = torch.tensor([0, 1, 0, 0, 0])
-
-# # Resize t1 to match the size of t2 and fill the rest with zeros
-# t1_resized = torch.cat((t1, torch.zeros(0, dtype=t1.dtype)))
-# print(t1_resized)
-# def calculate_micro_f1_for_epoch(predicted_batches, actual_batches, num_classes):
-#     # Initialize counters for the epoch
-#     TP_epoch = torch.tensor(0, dtype=torch.int32)
-#     FP_epoch = torch.tensor(0, dtype=torch.int32)
-#     FN_epoch = torch.tensor(0, dtype=torch.int32)
-    
-#     # Iterate over batches
-#     for predicted, actual in zip(predicted_batches, actual_batches):
-#         for c in range(num_classes):
-#             # Accumulate TP, FP, FN across all batches for all classes
-#             TP_epoch += torch.sum((predicted == c) & (actual == c))
-#             FP_epoch += torch.sum((predicted == c) & (actual != c))
-#             FN_epoch += torch.sum((predicted != c) & (actual == c))
-    
-#     # Compute precision, recall, and F1 score (micro-averaged)
-#     precision = TP_epoch / (TP_epoch + FP_epoch + 1e-8)  # Avoid division by zero
-#     recall = TP_epoch / (TP_epoch + FN_epoch + 1e-8)
-#     f1_score = 2 * (precision * recall) / (precision + recall + 1e-8)
-    
-#     return f1_score.item(), precision.item(), recall.item()
-
-# # Example usage
-# # Predicted and actual matchings (class representations) for batches
-# predicted_batches = [torch.tensor([0, 2, 1, 2]), torch.tensor([1, 0, 2, 1])]
-# actual_batches = [torch.tensor([0, 1, 1, 2]), torch.tensor([1, 0, 2, 2])]
-
-# num_classes = 3  # Number of unique matchings/classes
-# f1_score, precision, recall = calculate_micro_f1_for_epoch(predicted_batches, actual_batches, num_classes)
-
-# print("Micro-Averaged F1 Score:", f1_score)
-# print("Micro-Averaged Precision:", precision)
-# print("Micro-Averaged Recall:", recall)
-# import numpy as np
-# a = np.array([1,1,0,1])
-# b = np.array([1,0,1,0])
-
-# print(a+b)
-# predictions = torch.tensor([
-#     [0, 0, 0, 0, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
-#     [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-# ], device='cuda:0')
-
-# ground_truth = torch.tensor([
-#     [0, 4, 2, 1, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-#     [12, 9, 16, 4, 7, 18, 3, 0, 8, 6, 17, 13, 15, 5, 1, 14, 10, 2, 11]
-# ], device='cuda:0')
-
-# # Initialize the result dictionary
-# result_dict = {}
-
-# # Iterate through the batch
-# for idx in range(predictions.size(0)): # Loop through batch size
-#     pred_row = predictions[idx]
-#     gt_row = ground_truth[idx]
-#     length = pred_row.size(0)  # Length of the current row
-
-#     # Generate a tensor where 1 indicates a wrong prediction, 0 indicates correct
-#     comparison = (pred_row != gt_row).int()
-
-#     # Add the result to the dictionary
-#     if length not in result_dict:
-#         result_dict[length] = []
-#     result_dict[length].append(comparison.tolist())
-
-# # Output the dictionary
-# print(result_dict)
+    def forward(self, source_Points, target_Points, pos_indices, n_points):
+        
+        device = source_Points.device
+        batch_size, num_points, feature_size = source_Points.shape
+        
+        sim_numerator = torch.bmm(source_Points, target_Points.transpose(1, 2))
+        
+        source_normed = torch.norm(source_Points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(2)
+        target_normed = torch.norm(target_Points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(1)
+        sim_denominator = torch.bmm(source_normed, target_normed)
+        
+        cosine_sim = sim_numerator / sim_denominator
+        
+        sim_tensor = []
+        for i in range(batch_size):
+            sim_tensor.append(cosine_sim[i, :n_points[i], :])
+        
+        sim_tensor = torch.concat(sim_tensor, dim=0).to(device)
+        
+        pos_idx_mask = torch.zeros((sim_tensor.shape[0], sim_tensor.shape[1]), dtype=torch.bool).to(sim_tensor.device)
+        rows = torch.arange(sim_tensor.shape[0]).to(sim_tensor.device)
+        pos_idx_mask[rows, pos_indices] = 1
+        
+        pos_score = torch.masked_select(sim_tensor, pos_idx_mask).reshape(-1, 1)
+        pos_score = pos_score / self.temperature
+        pos_score = torch.exp(pos_score)
+        
+        trans_cosine_sim = cosine_sim.transpose(1, 2)
+        trans_sim_tensor = []
+        for i in range(batch_size):
+            trans_sim_tensor.append(trans_cosine_sim[i, :n_points[i], :])
+        trans_sim_tensor = torch.concat(trans_sim_tensor, dim=0).to(device)
+        
+        trans_sim_tensor = trans_sim_tensor / self.temperature
+        trans_sim_tensor = torch.exp(trans_sim_tensor)
+        trans_sim_tensor_sum = torch.sum(trans_sim_tensor, dim=-1).reshape(-1, 1)
+        
+        
+        noise_vectors = torch.normal(
+            mean=0.0,
+            std=self.noise_scale,
+            size=(num_points, feature_size)
+        ).to(device)
+        
+        filtered_source_points = []
+        for i in range(batch_size):
+            filtered_source_points.append(source_Points[i, :n_points[i], :])
+        filtered_source_points = torch.concat(filtered_source_points, dim=0).to(device)
+            
+        filtered_source_points_normed = torch.norm(filtered_source_points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(1)
+        noise_vectors_normed = torch.norm(noise_vectors, p=2, dim=-1).clamp(min=1e-8).unsqueeze(0)
+        
+        noise_numerator = torch.matmul(filtered_source_points, noise_vectors.transpose(0, 1))
+        noise_denominator = torch.matmul(filtered_source_points_normed, noise_vectors_normed)
+        
+        noise_term = noise_numerator / noise_denominator
+        noise_term = noise_term / self.temperature
+        noise_term = torch.exp(noise_term)
+        noise_term_sum = torch.sum(noise_term, dim=-1).reshape(-1, 1)
+        noise_term_sum = self.lambda_balance * noise_term_sum
+        
+        loss = -torch.log(pos_score / (trans_sim_tensor_sum + noise_term_sum))
+        loss = torch.mean(loss)
+        return loss
+        
+        
+if __name__ == '__main__':
+    source_Points = torch.rand(2, 10, 512)
+    target_Points = torch.rand(2, 10, 512)
+    pos_indices = torch.tensor([0, 1, 3, 2, 6, 7, 8, 9, 0, 1, 3, 2, 6, 7, 8, 9, 5])
+    n_points = torch.tensor([8, 9])
+    loss = GS_InfoNCE_Loss(0.1, 1, 1)
+    print(loss(source_Points, target_Points, pos_indices, n_points))

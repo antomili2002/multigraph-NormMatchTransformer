@@ -103,11 +103,14 @@ class GMDataset(Dataset):
             graph.num_nodes = n_p_gt
             graph_list.append(graph)
 
+        current_class = anno_list[0]["cls"]
+        
         ret_dict = {
             "Ps": [torch.Tensor(x) for x in points_gt],
             "ns": [torch.tensor(x) for x in n_points_gt],
             "gt_perm_mat": perm_mat_list,
             "edges": graph_list,
+            "cls": current_class,
         }
 
         imgs = [anno["image"] for anno in anno_list]
@@ -266,7 +269,7 @@ def get_dataloader(dataset, data_sampler, fix_seed=True, shuffle=False):
         batch_size=cfg.BATCH_SIZE,
         sampler=data_sampler,
         shuffle=shuffle,
-        num_workers=2,
+        num_workers=4,
         collate_fn=collate_fn,
         pin_memory=False,
         worker_init_fn=worker_init_fix if fix_seed else worker_init_rand,

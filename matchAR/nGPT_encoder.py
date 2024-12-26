@@ -183,9 +183,8 @@ class SelfAttention(nn.Module):
         logits = (q @ k.transpose(-2, -1)) * self.scale # (batch_size, num_heads, seq_len, seq_len)
         
         mask_ = mask.unsqueeze(1).unsqueeze(2)
-        
         # here we mask out all the future-values
-        logits = logits.masked_fill(mask_, float('-inf'))  # (batch_size, num_heads, seq_len, seq_len)
+        logits = logits.masked_fill(mask_, -1e9)  # (batch_size, num_heads, seq_len, seq_len)
 
         # Compute attention scores (grab the relevant values that correspond to the attention logits)
         scores =  F.softmax(logits, dim=-1) @ v # (batch_size, n_heads, seq_len, head_dim)
