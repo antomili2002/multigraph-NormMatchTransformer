@@ -482,6 +482,29 @@ class MatchARNet(utils.backbone.VGG16_bn):
         
         sim_score_all = self.w_cosine(hs_dec_output_, ht_dec_output_)
         
+        B, points_size, _ = hs_dec_output.shape
+        A_expanded = hs_dec_output.unsqueeze(2)  # Größe [8, num_points_A, 1, 512]
+        B_expanded = ht_dec_output.unsqueeze(1)
+        anchor_points = torch.cat((A_expanded.expand(-1, -1, points_size, -1), 
+                    B_expanded.expand(-1, points_size, -1, -1)), dim=-1)
+        
+        anchor_points = cosine_norm(self.anchorMLP(anchor_points))
+        # print(hs_dec_output)
+        # print(ht_dec_output)
+        sim_res_tensor = []
+        for batch in range(B):
+            sim_res_tensor.append([])
+            for i in range(points_size):
+                current_hs_point = hs_dec_output[batch, i, :]
+                current_anchor_point = anchor_points[batch, i, :, :]
+                hs_to_anchor = self.w_cosine(current_hs_point, current_anchor_point)
+                hs_to_anchor = hs_to_anchor.reshape(points_size)
+                current_hs_points = hs_dec_output[batch, :, :]
+                ht_to_anchor = torch.nn.functional.cosine_similarity(current_hs_points, current_anchor_point)
+                sim_res = (hs_to_anchor + ht_to_anchor) / 2
+                sim_res_tensor[batch].append(sim_res)
+        sim_res_tensor = [torch.stack(batch) for batch in sim_res_tensor]
+        sim_res_tensor = torch.stack(sim_res_tensor).to(hs_dec_output.device)
         # prototype_score = torch.bmm(ht_dec_output, ht_dec_output.transpose(1, 2)) #torch.bmm(h_t_norm, h_t_norm.transpose(1, 2))
         
         # Seoncd Loss for global(class) sim-score
