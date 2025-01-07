@@ -180,83 +180,25 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                     predictions_list.append([])
                     # keypoint_order.append([])
                     
-                input_order = torch.arange(N_t).unsqueeze(0).expand(B, -1).to(device)
-                prediction_mask = torch.zeros((B, N_t), dtype=torch.bool).to(device)
-                matched_points_mask = torch.zeros((B, N_t+1, N_t+1), dtype=torch.bool).to(device)
-                matched_padding_mask_hs = torch.zeros((B, N_t+1, N_t+1), dtype=torch.bool).to(device)
-                matched_padding_mask_ht = torch.zeros((B, N_t+1, N_t+1), dtype=torch.bool).to(device)
                 
-                for b_ in range(B):
-                    prediction_mask[b_, n_points_gt[0][b_]:] = 1
-                    matched_points_mask[b_, n_points_gt[0][b_]+1:, :] = 1
-                    matched_points_mask[b_, :, n_points_gt[0][b_]+1:] = 1
-                    
-                    matched_padding_mask_hs[b_, n_points_gt[0][b_]+1:, :] = 1
-                    matched_padding_mask_hs[b_, :, n_points_gt[0][b_]+1:] = 1
-                    
-                    matched_padding_mask_ht[b_, n_points_gt[0][b_]+1:, :] = 1
-                    matched_padding_mask_ht[b_, :, n_points_gt[0][b_]+1:] = 1
-                    
                 
+                    
+                similarity_scores, _, _, _, _ = model(data_list, points_gt, edges, n_points_gt, n_points_sample, perm_mat_list, eval_pred_points, in_training= False)
+                
+                batch_size = similarity_scores.shape[0]
+                
+                sinkhorn = sinkhorn_logspace(similarity_scores)
+                
+                sinkhorn_max = torch.argmax(sinkhorn, dim=-1)
                 for np in range(N_t):
-                    
-                    # target_points, model_output = model(data_list, points_gt, edges, n_points_gt,  perm_mat_list, n_points_sample, eval_pred_points, in_training= False)
-                    similarity_scores, _, _, _, _ = model(data_list, points_gt, edges, n_points_gt, n_points_sample, perm_mat_list, eval_pred_points, in_training= False, input_order=input_order, matched_points_mask=matched_points_mask, matched_padding_mask_hs= matched_padding_mask_hs, matched_padding_mask_ht=matched_padding_mask_ht)
-                    # target_points = cosine_norm(target_points)
-                    batch_size = similarity_scores.shape[0]
-                    num_points1 = similarity_scores.shape[1]
-                    
-                    # for b_ in range(batch_size):
-                    #     similarity_scores[b_, :, prediction_mask[b_]] = -1
-                    sinkhorn = sinkhorn_logspace(similarity_scores)#sinkhorn_cosine(similarity_scores)
-                    
-                    # keypoint_preds_T = F.softmax(similarity_scores, dim=-2)
-                    # keypoint_preds = F.softmax(similarity_scores, dim=-1)
-                    
-                    keypoint_preds = sinkhorn # (keypoint_preds + keypoint_preds_T) / 2
-                    # keypoint_preds_ = torch.argmax(keypoint_preds, dim=-1)
                     for b in range(batch_size):
-                        #Max similarity scores between source and target nodes
-                        keypoint_preds[b, :, prediction_mask[b]] = -1
-                        max_similarities, max_similarities_index = torch.max(keypoint_preds[b], dim=-1)
-                        #picking the best source-target match
-                        best_match, best_match_index = torch.max(max_similarities[eval_pred_points:], dim=-1)
-                        
-                        # print(max_similarities, max_similarities_index)
-                        # print(best_match, best_match_index)
-                        #to get the index from the original similarity index 
-                        best_source_index = best_match_index.item() + eval_pred_points
-                        
-                        best_pred_index = max_similarities_index[best_source_index].item()
-                       
-                        input_order[b, [eval_pred_points, best_source_index]] = input_order[b, [best_source_index, eval_pred_points]]
-                        
-                        # if b == 0:
-                        #     print(best_source_index, eval_pred_points)
-                        #     print(input_order[b,:])
-                        #     print(max_similarities)
-                        # print(input_order)
-                        # keypoint_order[b].append(best_source_index)
-                        # cosine_similarities = F.cosine_similarity(model_output[b, eval_pred_points].unsqueeze(0), target_points[b])
-                        # cosine_similarities = torch.atanh(cosine_similarities)
-                        # cosine_scores = F.softmax(cosine_similarities, dim=-1)
-                        # cosine_matchings = torch.argmax(cosine_scores, dim=-1)
-                        
                         if eval_pred_points < n_points_gt[0][b]:
-                            predictions_list[b].append(best_pred_index)
-                            matched_points_mask[b, 1:, best_pred_index+1] = 1
-                            matched_points_mask[b, 1+best_pred_index, :] = 1
-                            prediction_mask[b, best_pred_index] = 1
-                            
-                            matched_padding_mask_hs[b, 1:, best_pred_index+1] = 1
-                            # predictions_list[b].append(keypoint_preds_[b][eval_pred_points].item())
+                            predictions_list[b].append(sinkhorn_max[b, eval_pred_points].item())
                         else:
                             predictions_list[b].append(-1)
-                    
-                    matched_padding_mask_hs[:,:,eval_pred_points+1] = 1
                     eval_pred_points +=1
-                for bat in range(B):
-                    perm_mat_list[0][bat, :, :] = perm_mat_list[0][bat, input_order[bat, :], :]
+                
+                
                 
                 prediction_tensor = torch.tensor(predictions_list).to(perm_mat_list[0].device)
                 y_values_matching = torch.argmax(perm_mat_list[0], dim=-1)

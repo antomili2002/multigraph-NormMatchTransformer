@@ -354,22 +354,6 @@ class MatchARNet(utils.backbone.VGG16_bn):
         
         
         
-        
-        # if cfg.Matching_TF.global_feat != True:
-        #     (B, N_s, D), N_t = h_s.size(), h_t.size(1)
-        #     query_mask = ~(s_mask.view(B, N_s, 1) & t_mask.view(B, 1, N_t))
-        #     queries = make_queries(h_s, h_t)
-
-        # else:
-        #     (B, N_s, D), N_t = h_s.size(), h_t.size(1)
-        #     N_s -= 1
-        #     N_t -= 1 
-        #     query_mask = ~(s_mask[:,:-1].view(B, N_s, 1) & t_mask[:,:-1].view(B, 1, N_t))
-        #     queries = make_queries(h_s[:,:-1,:], h_t[:,:-1,:])
-        
-        # query_mask = query_mask.view(B, -1)
-        # print(query_mask.size(), query_mask)
-        # print(n_points_sample)
         batch_size, seq_len, _ = h_s.shape
         padding_mask = torch.zeros((batch_size, seq_len, seq_len), dtype=torch.bool).to(h_s.device)
         if in_training is True:
@@ -390,63 +374,14 @@ class MatchARNet(utils.backbone.VGG16_bn):
                     t_mask[idx, e:] = False
                     h_t[idx, e:, :] = 0
           
-        source_points_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1).to(h_s.device)#(1 - torch.triu(torch.ones((batch_size, sample_size_each, sample_size_each)), diagonal=1)).bool()
-        if cfg.Matching_TF.global_feat:
-            source_points_mask[0, :] = False
+        
             
-        if in_training == False:
-            if cfg.Matching_TF.global_feat:
-                h_s[:,1:, :] = self.update_order(h_s[:,1:, :], input_order)
-                diagonal_mask = ~torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=0).to(h_s.device)
-                res_mask = source_points_mask + diagonal_mask
-                for j in range(eval_pred_points):
-                    res_mask[j:,j] = False
-                res_mask[:,0] = False
-                source_points_mask = res_mask
-            else:
-                h_s = self.update_order(h_s, input_order)
-                diagonal_mask = ~torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=0).to(h_s.device)
-                res_mask = source_points_mask + diagonal_mask
-                for j in range(eval_pred_points):
-                    res_mask[j:,j] = False
-                source_points_mask = res_mask
         
-        # print(n_points)
-        # print(s_mask.shape, s_mask)
-        # print(h_s.shape, h_s)
-        # br
-        # input = torch.cat((h_s + self.s_enc, h_t + self.t_enc), dim=1)
-        # encoder_output = self.tf_encoder(src=input, src_key_padding_mask=S_mask)
+        source_points_mask = torch.zeros(seq_len, seq_len, dtype=torch.bool).to(h_t.device)
+        hs_dec_output = self.n_gpt_decoder(h_s, source_points_mask, padding_mask, h_t)
         
-        
-        #Encoder-Decoder
-        # S_mask = ~torch.cat((s_mask, t_mask), dim=1)
-        # input = torch.cat((h_s, h_t), dim=1)
-        # _, encoder_memory = self.n_gpt_encoder(input, S_mask)
-        
-        # sample_size_each = encoder_memory.size()[1] // 2 #Get the amount of concatenated points
-        # # #split context sensitiv output from encoder into source and target patches
-        # source_points = encoder_memory[:, :sample_size_each, :].to(encoder_memory.device)
-        # target_points = encoder_memory[:, sample_size_each:, :].to(encoder_memory.device)
-        
-        
-        
-        
-        if in_training == False:
-            #Encoder-Decoder
-            # hs_dec_output = self.n_gpt_decoder(source_points, source_points_mask, matched_padding_mask_ht, target_points)
-            
-            #Decoder-Decoder
-            hs_dec_output = self.n_gpt_decoder(h_s, source_points_mask, matched_padding_mask_ht, h_t)
-            ht_dec_output = self.n_gpt_decoder_2(h_t, matched_points_mask, matched_padding_mask_hs, h_s, is_eval=True)
-        else:
-            #Encoder-Decoder
-            # hs_dec_output = self.n_gpt_decoder(source_points, source_points_mask, padding_mask, target_points)
-            
-            #Decoder-Decoder
-            hs_dec_output = self.n_gpt_decoder(h_s, source_points_mask, padding_mask, h_t)
-            ht_decoder_mask = torch.zeros(seq_len, seq_len, dtype=torch.bool).to(h_t.device)
-            ht_dec_output = self.n_gpt_decoder_2(h_t, ht_decoder_mask, padding_mask, h_s)
+        ht_decoder_mask = torch.zeros(seq_len, seq_len, dtype=torch.bool).to(h_t.device)
+        ht_dec_output = self.n_gpt_decoder_2(h_t, ht_decoder_mask, padding_mask, h_s)
             
         # paired_global_feat = torch.cat([hs_dec_output[ :, 0, :], ht_dec_output[ :, 0, :]], dim=-2).to(hs_dec_output.device)
         # paired_global_feat = self.scaled_mlp(paired_global_feat)
@@ -461,20 +396,6 @@ class MatchARNet(utils.backbone.VGG16_bn):
         ht_dec_output = ht_dec_output[:, 1:, :]
         
         prototype_score = []
-        if in_training == True:
-            # print(hs_dec_output)
-            # print(perm_mats[0].shape)
-            match_idx = torch.argmax(perm_mats[0], dim=-1)
-            # print(match_idx.shape)
-            for b in range(hs_dec_output.shape[0]): #Batch size
-                current_hs = hs_dec_output[b, :n_points[0][b].item(), :]
-                current_ht = ht_dec_output[b, :n_points[0][b].item(), :]
-                current_idx = match_idx[b, :n_points[0][b].item()]
-                reOrdered_ht = current_ht[current_idx]
-                matches_expanded = (current_hs * reOrdered_ht).unsqueeze(0)#torch.concat([current_hs, reOrdered_ht], dim=-1).unsqueeze(0)
-                matches_expanded = cosine_norm(matches_expanded)
-                matches_sim = torch.bmm(matches_expanded, matches_expanded.transpose(-2, -1))
-                prototype_score.append(matches_sim)
         
         
         # h_t_norm = cosine_norm(h_t)
@@ -482,28 +403,7 @@ class MatchARNet(utils.backbone.VGG16_bn):
         
         sim_score = self.w_cosine(hs_dec_output, ht_dec_output) #self.w_cosine(hs_dec_output, h_t_norm)
         
-        hs_dec_output_ = hs_dec_output.reshape(hs_dec_output.shape[0] * hs_dec_output.shape[1], hs_dec_output.shape[2])
-        ht_dec_output_ = ht_dec_output.reshape(ht_dec_output.shape[0] * ht_dec_output.shape[1], ht_dec_output.shape[2])
-        
         sim_score_all = torch.tensor([]) #self.w_cosine(hs_dec_output_, ht_dec_output_)
-        
-        # B, points_size, _ = hs_dec_output.shape
-        # A_expanded = hs_dec_output.unsqueeze(2)  # Größe [8, num_points_A, 1, 512]
-        # B_expanded = ht_dec_output.unsqueeze(1)
-        # anchor_points = torch.cat((A_expanded.expand(-1, -1, points_size, -1), 
-        #             B_expanded.expand(-1, points_size, -1, -1)), dim=-1)
-        
-        # anchor_points = self.anchorMLP(anchor_points)
-        # anchor_points = anchor_points.squeeze(-1)
-        # anchor_points = torch.nn.functional.softmax(anchor_points, dim=-1)
-        # sim_score = sim_score * anchor_points
-        # prototype_score = torch.bmm(ht_dec_output, ht_dec_output.transpose(1, 2)) #torch.bmm(h_t_norm, h_t_norm.transpose(1, 2))
-        
-        # Seoncd Loss for global(class) sim-score
-        # paired_global_feat = cosine_norm(paired_global_feat)
-        
-        # split_size = paired_global_feat.shape[0] // 2
-        # gloabl_feat_score = paired_global_feat[:split_size, :] @ paired_global_feat[split_size:, :].transpose(-1, -2)
         
         
         return sim_score, sim_score_all, prototype_score, hs_dec_output, ht_dec_output #gloabl_feat_score  #target_points, hs_dec_output
