@@ -172,6 +172,9 @@ class MatchARNet(utils.backbone.VGG16_bn):
         self.n_gpt_decoder = NGPT_DECODER(nGPT_decoder_config)
         
         self.n_gpt_decoder_2 = NGPT_DECODER(nGPT_decoder_config)
+        # self.n_gpt_decoder_2.load_state_dict(self.n_gpt_decoder.state_dict())
+        
+        # self.anchorMLP = MLP_scaled(cfg.Matching_TF.d_model*2, cfg.Matching_TF.d_model//3, 1)
         
         # nGPT_encoder_config = ModelConfig()
         # nGPT_encoder_config.dim = cfg.Matching_TF.d_model
@@ -475,36 +478,25 @@ class MatchARNet(utils.backbone.VGG16_bn):
         
         
         # h_t_norm = cosine_norm(h_t)
+        # print(hs_dec_output.size(), ht_dec_output.size())
+        
         sim_score = self.w_cosine(hs_dec_output, ht_dec_output) #self.w_cosine(hs_dec_output, h_t_norm)
         
         hs_dec_output_ = hs_dec_output.reshape(hs_dec_output.shape[0] * hs_dec_output.shape[1], hs_dec_output.shape[2])
         ht_dec_output_ = ht_dec_output.reshape(ht_dec_output.shape[0] * ht_dec_output.shape[1], ht_dec_output.shape[2])
         
-        sim_score_all = self.w_cosine(hs_dec_output_, ht_dec_output_)
+        sim_score_all = torch.tensor([]) #self.w_cosine(hs_dec_output_, ht_dec_output_)
         
-        B, points_size, _ = hs_dec_output.shape
-        A_expanded = hs_dec_output.unsqueeze(2)  # Größe [8, num_points_A, 1, 512]
-        B_expanded = ht_dec_output.unsqueeze(1)
-        anchor_points = torch.cat((A_expanded.expand(-1, -1, points_size, -1), 
-                    B_expanded.expand(-1, points_size, -1, -1)), dim=-1)
+        # B, points_size, _ = hs_dec_output.shape
+        # A_expanded = hs_dec_output.unsqueeze(2)  # Größe [8, num_points_A, 1, 512]
+        # B_expanded = ht_dec_output.unsqueeze(1)
+        # anchor_points = torch.cat((A_expanded.expand(-1, -1, points_size, -1), 
+        #             B_expanded.expand(-1, points_size, -1, -1)), dim=-1)
         
-        anchor_points = cosine_norm(self.anchorMLP(anchor_points))
-        # print(hs_dec_output)
-        # print(ht_dec_output)
-        sim_res_tensor = []
-        for batch in range(B):
-            sim_res_tensor.append([])
-            for i in range(points_size):
-                current_hs_point = hs_dec_output[batch, i, :]
-                current_anchor_point = anchor_points[batch, i, :, :]
-                hs_to_anchor = self.w_cosine(current_hs_point, current_anchor_point)
-                hs_to_anchor = hs_to_anchor.reshape(points_size)
-                current_hs_points = hs_dec_output[batch, :, :]
-                ht_to_anchor = torch.nn.functional.cosine_similarity(current_hs_points, current_anchor_point)
-                sim_res = (hs_to_anchor + ht_to_anchor) / 2
-                sim_res_tensor[batch].append(sim_res)
-        sim_res_tensor = [torch.stack(batch) for batch in sim_res_tensor]
-        sim_res_tensor = torch.stack(sim_res_tensor).to(hs_dec_output.device)
+        # anchor_points = self.anchorMLP(anchor_points)
+        # anchor_points = anchor_points.squeeze(-1)
+        # anchor_points = torch.nn.functional.softmax(anchor_points, dim=-1)
+        # sim_score = sim_score * anchor_points
         # prototype_score = torch.bmm(ht_dec_output, ht_dec_output.transpose(1, 2)) #torch.bmm(h_t_norm, h_t_norm.transpose(1, 2))
         
         # Seoncd Loss for global(class) sim-score
@@ -628,8 +620,8 @@ class PairwiseWeightedCosineSimilarity(nn.Module):
         # x and y have shape [batch_size, nodes, node_feature]
         
         # Apply weights
-        x_weighted = x * self.w  # Shape: [batch_size, nodes_x, node_feature]
-        y_weighted = y * self.w  # Shape: [batch_size, nodes_y, node_feature]
+        x_weighted = x #* self.w  # Shape: [batch_size, nodes_x, node_feature]
+        y_weighted = y #* self.w  # Shape: [batch_size, nodes_y, node_feature]
         
         y_weighted_transposed = y_weighted.transpose(-2, -1)  # Shape: [batch_size, node_feature, nodes_y]
         numerator = torch.bmm(x_weighted, y_weighted_transposed)  # Shape: [batch_size, nodes_x, nodes_y]
@@ -671,19 +663,11 @@ class MLP_scaled(nn.Module):
                         if device is None else device)
 
         # the up, down, and gate projections
-        self.Wup = nn.Linear(input_dim, hidden_dim, bias=False, device=self.device)
-        self.Wgate = nn.Linear(input_dim, hidden_dim, bias=False, device=self.device)
-        self.Wdown = nn.Linear(hidden_dim, output_dim, bias=False, device=self.device)
+        self.lin1 = nn.Linear(input_dim, hidden_dim, bias=False, device=self.device)
+        self.relu = nn.ReLU()
+        self.lin2 = nn.Linear(hidden_dim, output_dim, bias=False, device=self.device)
+        
 
-        # this flag designates Wdown to have a different parameter initialization as defined in model.py
-        self.Wdown.GPT_scale_init = 1 
-
-        # the learnable scaling factors
-        self.s_u = Scale(hidden_dim, device=device)
-        self.s_v = Scale(hidden_dim, device=device)
-
-        # the varaince-controlling scaling term, needed to benefit from SiLU (see appendix A.1)
-        self.scale = math.sqrt(input_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -695,12 +679,7 @@ class MLP_scaled(nn.Module):
         Returns:
             torch.Tensor: Output tensor of shape (batch_size, seq_len, output_dim).
         """
-        # our up & gate projections
-        u = self.Wup(x) # (batch_size, seq_len, hidden_dim)
-        v = self.Wgate(x)
-        # scale them
-        u = u * self.s_u()
-        v = v * self.s_v() * self.scale 
-        # now perform the nonlinearity gate
-        hidden = u * F.silu(v) # (batch_size, seq_len, hidden_dim)
-        return self.Wdown(hidden) # (batch_size, seq_len, output_dim)
+        x_ = self.lin1(x)
+        x_ = self.relu(x_)
+        x_ = self.lin2(x_)
+        return x_

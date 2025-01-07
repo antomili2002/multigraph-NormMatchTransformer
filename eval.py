@@ -3,10 +3,77 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
+import torch.distributed as dist  # Add this import
 from scipy.optimize import linear_sum_assignment
 
 from utils.config import cfg
 from utils.evaluation_metric import calculate_correct_and_valid, calculate_f1_score, get_pos_neg
+
+
+def sinkhorn_logspace(
+    similarity: torch.Tensor,
+    epsilon: float = 0.035,
+    max_iter: int = 27
+) -> torch.Tensor:
+    """
+    Log-space Sinkhorn to convert a batch of similarity matrices into 
+    doubly-stochastic matrices.
+    
+    Args:
+        similarity: [batch_size, n, m] matrix of similarities
+        epsilon:    Entropic regularization (larger => smoother distribution)
+        max_iter:   Number of Sinkhorn iterations in log domain
+    
+    Returns:
+        [batch_size, n, m] doubly-stochastic matrix
+    """
+    log_Q = similarity / epsilon
+
+    for _ in range(max_iter):
+        log_sum_rows = torch.logsumexp(log_Q, dim=2, keepdim=True)
+        log_Q = log_Q - log_sum_rows
+
+        log_sum_cols = torch.logsumexp(log_Q, dim=1, keepdim=True)
+        # broadcast subtraction
+        log_Q = log_Q - log_sum_cols
+
+    Q = torch.exp(log_Q)
+    return Q
+
+def sinkhorn_cosine(
+    cosine_sim: torch.Tensor,
+    max_iter: int = 15,
+    eps: float = 1e-9
+) -> torch.Tensor:
+    """
+    Converts a batch of cosine similarity matrices into doubly-stochastic matrices 
+    using the Sinkhorn algorithm.
+
+    Args:
+        cosine_sim: Tensor of shape (batch_size, n, m).
+        max_iter:   Number of Sinkhorn iterations.
+        eps:        Small numerical stabilizer to avoid division by zero.
+
+    Returns:
+        Doubly-stochastic matrices of shape (batch_size, n, m).
+    """
+
+    # 1) Exponentiate to ensure entries are positive
+    #    (you can also add a temperature scale if needed).
+    # cosine_sim[cosine_sim <= 0] = eps
+    # input_tensor = cosine_sim
+    Q = torch.exp(input_tensor)
+
+    for _ in range(max_iter):
+        # 2) Row normalization
+        row_sums = Q.sum(dim=2, keepdim=True) + eps
+        Q = Q / row_sums
+
+        # 3) Column normalization
+        col_sums = Q.sum(dim=1, keepdim=True) + eps
+        Q = Q / col_sums
+        
+    return Q
 
 def cosine_norm(x, dim=-1):
         """
@@ -136,13 +203,17 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                     # target_points, model_output = model(data_list, points_gt, edges, n_points_gt,  perm_mat_list, n_points_sample, eval_pred_points, in_training= False)
                     similarity_scores, _, _, _, _ = model(data_list, points_gt, edges, n_points_gt, n_points_sample, perm_mat_list, eval_pred_points, in_training= False, input_order=input_order, matched_points_mask=matched_points_mask, matched_padding_mask_hs= matched_padding_mask_hs, matched_padding_mask_ht=matched_padding_mask_ht)
                     # target_points = cosine_norm(target_points)
-                    
-                    
-                    # batch_size = model_output.size()[0]
-                    # num_points1 = model_output.size()[1]
                     batch_size = similarity_scores.shape[0]
                     num_points1 = similarity_scores.shape[1]
-                    keypoint_preds = similarity_scores # F.softmax(similarity_scores, dim=-1)
+                    
+                    # for b_ in range(batch_size):
+                    #     similarity_scores[b_, :, prediction_mask[b_]] = -1
+                    sinkhorn = sinkhorn_logspace(similarity_scores)#sinkhorn_cosine(similarity_scores)
+                    
+                    # keypoint_preds_T = F.softmax(similarity_scores, dim=-2)
+                    # keypoint_preds = F.softmax(similarity_scores, dim=-1)
+                    
+                    keypoint_preds = sinkhorn # (keypoint_preds + keypoint_preds_T) / 2
                     # keypoint_preds_ = torch.argmax(keypoint_preds, dim=-1)
                     for b in range(batch_size):
                         #Max similarity scores between source and target nodes
