@@ -321,7 +321,7 @@ class InfoNCE_Loss(torch.nn.Module):
 lr_schedules = {
     #TODO: CHANGE BACK TO 10
     "long_halving1": (32, (3, 8, 13, 20), 0.3),
-    "long_halving2": (32, (10, 15, 30), 0.15),
+    "long_halving2": (32, (10, 15, 30), 0.1),
     "long_halving3": (32, (32,), 0.1),
     # "long_halving": (30, (3, 6, 12, 26), 0.25),
     # "long_halving": (50, (40,), 0.1),

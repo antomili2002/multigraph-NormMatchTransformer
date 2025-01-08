@@ -8,13 +8,13 @@
   },
   "SPLINE_CNN": {
     "input_features": 1024,
-    "output_features": 512
+    "output_features": 648
   },
   "Matching_TF": {
-    "n_head": 8,
+    "n_head": 12,
     "n_encoder": 4,
     "n_decoder": 4,
-    "d_model": 512,
+    "d_model": 648,
     "nGPT_mlp_hidden_mult": 6,
     "activation": "relu",
     "batch_norm": true,
@@ -46,7 +46,7 @@
   "visualization_params": {
     "reduced_vis": true
   },
-  "evaluate_only": true,
+  "evaluate_only": false,
   "model_dir": "./results/voc_basic/matchAR_corrected_mask",
   "log_dir": "runs/",
   "MODEL_ARCH": "ar"

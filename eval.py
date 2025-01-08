@@ -161,16 +161,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                 
                 matchings = []
                 B, N_s, N_t = perm_mat_list[0].size()
-                n_points_sample = n_points_gt[0]#torch.zeros(B, dtype=torch.int).to(device)
-                # perm_mat_dec_list = [torch.zeros(B, N_s, N_t, dtype=torch.int).to(device)]
-                # cost_mask = torch.ones(B, N_s, N_t, dtype=torch.int).to(device)
-                # batch_idx = torch.arange(cfg.BATCH_SIZE)
-            
-                # set matching score for padded to zero
-                # for batch in batch_idx:
-                #     n_point = n_points_gt[0][batch]
-                #     cost_mask[batch, n_point:, :] = -1
-                #     cost_mask[batch, :, n_point:] = -1
+                n_points_sample = n_points_gt[0]
                 
                 eval_pred_points = 0
                 j_pred = 0
@@ -178,7 +169,6 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                 # keypoint_order = []
                 for _ in range(B):
                     predictions_list.append([])
-                    # keypoint_order.append([])
                     
                 
                 
