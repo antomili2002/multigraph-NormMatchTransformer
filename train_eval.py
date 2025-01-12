@@ -323,6 +323,7 @@ lr_schedules = {
     "long_halving1": (32, (3, 8, 13, 20), 0.3),
     "long_halving2": (32, (10, 15, 30), 0.1),
     "long_halving3": (32, (32,), 0.1),
+    "long_halving4": (32, (2, 3), 0.1),
     # "long_halving": (30, (3, 6, 12, 26), 0.25),
     # "long_halving": (50, (40,), 0.1),
     "short_halving": (2, (1,), 0.5),
@@ -528,7 +529,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         # assert resume
         if local_rank == output_rank:
             print(f"Evaluating without training...")
-            accs, f1_scores, error_dict = eval.eval_model(model, dataloader["test"], local_rank, output_rank, eval_epoch=32)
+            accs, f1_scores, error_dict = eval.eval_model(model, dataloader["test"], local_rank, output_rank, eval_epoch=7)
             acc_dict = {
                 "acc_{}".format(cls): single_acc for cls, single_acc in zip(dataloader["train"].dataset.classes, accs)
             }
@@ -593,7 +594,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         #modeL_parameter_list = list(model.parameters())
         # print(modeL_parameter_list[-1:])
         for inputs in dataloader["train"]:
-            all_classes = [_ for _ in inputs["cls"]]
+            # all_classes = [_ for _ in inputs["cls"]]
             # print(all_classes)
             data_list = [_.cuda() for _ in inputs["images"]]
             points_gt_list = [_.cuda() for _ in inputs["Ps"]]
@@ -922,7 +923,7 @@ if __name__ == "__main__":
         )
 
     torch.manual_seed(cfg.RANDOM_SEED)
-    dataset_len = {"train": cfg.TRAIN.EPOCH_ITERS * cfg.BATCH_SIZE, "test": cfg.EVAL.SAMPLES } # 
+    dataset_len = {"train": cfg.TRAIN.EPOCH_ITERS * cfg.BATCH_SIZE, "test": cfg.EVAL.SAMPLES * world_size} # 
     image_dataset = {
         x: GMDataset(cfg.DATASET_NAME, sets=x, length=dataset_len[x], obj_resize=(256, 256)) for x in ("train", "test")
     }

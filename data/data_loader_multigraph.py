@@ -103,14 +103,13 @@ class GMDataset(Dataset):
             graph.num_nodes = n_p_gt
             graph_list.append(graph)
 
-        current_class = anno_list[0]["cls"]
+        # current_class = anno_list[0]["cls"]
         
         ret_dict = {
             "Ps": [torch.Tensor(x) for x in points_gt],
             "ns": [torch.tensor(x) for x in n_points_gt],
             "gt_perm_mat": perm_mat_list,
-            "edges": graph_list,
-            "cls": current_class,
+            "edges": graph_list
         }
 
         imgs = [anno["image"] for anno in anno_list]

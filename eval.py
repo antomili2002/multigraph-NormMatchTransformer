@@ -225,8 +225,8 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
             # fp += _fp
             # fn += _fn
 
-            if iter_num % cfg.STATISTIC_STEP == 0 and verbose:
-                running_speed = cfg.STATISTIC_STEP * batch_num / (time.time() - running_since)
+            if iter_num % 10 == 0 and verbose: #cfg.STATISTIC_STEP
+                running_speed = 10 * batch_num / (time.time() - running_since) #cfg.STATISTIC_STEP
                 print("Class {:<8} Iteration {:<4} {:>4.2f}sample/s".format(cls, iter_num, running_speed))
                 running_since = time.time()
         

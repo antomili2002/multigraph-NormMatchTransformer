@@ -166,10 +166,10 @@ class SelfAttention(nn.Module):
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim)
 
         # applying RoPE
-        sin = freqs['sin'][:, :seq_len, :, :].to(self.device) 
-        cos = freqs['cos'][:, :seq_len, :, :].to(self.device) # (1, seq_len, 1, head_dim // 2)
-        q = self.apply_rotary_pos_emb(q, sin, cos) # no shape change
-        k = self.apply_rotary_pos_emb(k, sin, cos)
+        # sin = freqs['sin'][:, :seq_len, :, :].to(self.device) 
+        # cos = freqs['cos'][:, :seq_len, :, :].to(self.device) # (1, seq_len, 1, head_dim // 2)
+        # q = self.apply_rotary_pos_emb(q, sin, cos) # no shape change
+        # k = self.apply_rotary_pos_emb(k, sin, cos)
 
         # normalizing & scaling our queries  & keys (see page 4)
         s_qk = self.s_qk() # (num_heads, head_dim)
@@ -456,8 +456,8 @@ class Layer(nn.Module):
         #EDIT
         h_C = cosine_norm(self.cross_attn(h, m, padding_mask))#freqs, 
         h = cosine_norm(h + self.alpha_C() * (h_C - h))
-        # print(h.shape, h)
-        # print("--------------------------------")
+        
+        
         global_feat = h[:,0,:]
         h_G = cosine_norm(h * global_feat.unsqueeze(1))
         h = cosine_norm(h + self.alpha_G() * (h_G - h))

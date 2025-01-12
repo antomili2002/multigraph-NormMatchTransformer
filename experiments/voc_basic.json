@@ -40,7 +40,7 @@
     "rince_q": 0.5,
     "rince_lambda": 0.025
   },
-  "STATISTIC_STEP": 4,
+  "STATISTIC_STEP": 1,
   "TRACK_GRAD_NORM": false,
   "visualize": false,
   "visualization_params": {
