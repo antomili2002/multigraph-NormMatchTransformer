@@ -323,7 +323,7 @@ lr_schedules = {
     "long_halving1": (32, (3, 8, 13, 20), 0.3),
     "long_halving2": (32, (10, 15, 30), 0.1),
     "long_halving3": (32, (2, 5), 0.1),
-    "long_halving4": (32, (2, 3), 0.1),
+    "long_halving4": (20, (2, 3), 0.1),
     # "long_halving": (30, (3, 6, 12, 26), 0.25),
     # "long_halving": (50, (40,), 0.1),
     "short_halving": (2, (1,), 0.5),
@@ -1004,7 +1004,7 @@ if __name__ == "__main__":
     
     if local_rank == output_rank:
         if all_error_dict is not None:
-            output_folder = "errors"
+            output_folder = f'errors_{cfg.DATASET_NAME}'
             os.makedirs(output_folder, exist_ok=True)
             for epoch, class_dict in all_error_dict.items():
                 save_dict = {}
