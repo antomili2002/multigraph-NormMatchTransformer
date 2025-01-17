@@ -292,7 +292,7 @@ class CrossAttention(nn.Module):
         batch_size, seq_len, _ = x.shape
         
         # Linear projections for queries, keys, and values
-        q, k, v = self.Wq(x), self.Wk(x), self.Wv(memory)
+        q, k, v = self.Wq(x), self.Wk(memory), self.Wv(memory)
             # shape: (batch_size, seq_len, dim) -> (batch_size, seq_len, num_heads * head_dim)
 
         # Reshape projections to separate heads

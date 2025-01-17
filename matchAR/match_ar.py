@@ -183,8 +183,20 @@ class MatchARNet(utils.backbone.VGG16_bn):
         # nGPT_encoder_config.mlp_hidden_mult = cfg.Matching_TF.nGPT_mlp_hidden_mult
         # self.n_gpt_encoder = NGPT_ENCODER(nGPT_encoder_config)
         
+        # self.prot_MLP = MLP_prototype(cfg.Matching_TF.d_model)
+        
+        self.mlp_out = MLP([cfg.Matching_TF.d_model, 384], cfg.Matching_TF.d_model, l2_scaling=False)
+        # self.mlp_out_2 = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, l2_scaling=True)
+        # self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, batch_norm=False)
+        # self.mlp_out_2 = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, batch_norm=False)
         self.w_cosine = PairwiseWeightedCosineSimilarity(cfg.Matching_TF.d_model)
         
+        self.global_state_dim = 1024
+
+        # matched encoding
+        # self.matched_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
+        # mask_match encoding
+        # self.mask_match_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
     
     def normalize_linear(self, module):
         """
@@ -225,6 +237,28 @@ class MatchARNet(utils.backbone.VGG16_bn):
         for module in self.modules():
             if isinstance(module, (nn.Linear, nn.Embedding)):
                 self.normalize_linear(module)
+    
+    # def update_queries(self, Q, in_training, eval_pred_points, n_points, all_targets):
+    #     if in_training is True:
+    #         return Q
+    #     B, _, _ = Q.size()
+    #     new_queries = Q
+    #     for i in range(B):
+    #         new_queries[i, n_points[i]:, :] = 0
+        
+    #     if len(eval_pred_points[0]) > 0:
+    #         for i in range(B):
+    #             current_n_points = n_points[i]
+    #             predicted_targets = eval_pred_points[i]
+    #             selected_targets = all_targets[i,predicted_targets, :]
+    #             print("----------------")
+    #             print(predicted_targets)
+    #             print(selected_targets.size(), selected_targets)
+    #             new_queries[i, current_n_points:(current_n_points+len(predicted_targets)), :] = selected_targets
+                
+                
+    #     return new_queries
+    
     
     def update_order(self, source_nodes, input_order):
         B, _, _ = source_nodes.shape
@@ -298,6 +332,17 @@ class MatchARNet(utils.backbone.VGG16_bn):
             global_feature_mask = torch.tensor([True]).unsqueeze(0).expand(h_res.size(0), -1).to(global_feature.device)
             mask = torch.cat([global_feature_mask, mask], dim=1)
             
+            # global_feature = cosine_norm(global_feature).squeeze(1).unsqueeze(0)
+            # if cfg.Matching_TF.global_feat:
+            #     # with torch.no_grad():
+            #     global_feature = self.final_layers(edges)[0].reshape((nodes.shape[0], -1))
+            #     global_feature = self.glob_to_node_dim(global_feature)
+            #     global_feature = global_feature + self.cls_enc
+            #     global_feature = global_feature.unsqueeze(1).expand(-1,1, -1)
+            #     h_res = torch.cat([global_feature, h_res], dim=1)
+
+            #     global_feature_mask = torch.tensor([True]).unsqueeze(0).expand(h_res.size(0), -1).to(global_feature.device)
+            #     mask = torch.cat([global_feature_mask, mask], dim=1)
 
 
             orig_graph_list.append((h_res,mask))
@@ -338,6 +383,8 @@ class MatchARNet(utils.backbone.VGG16_bn):
         ht_decoder_mask = torch.zeros(seq_len, seq_len, dtype=torch.bool).to(h_t.device)
         ht_dec_output = self.n_gpt_decoder_2(h_t, ht_decoder_mask, padding_mask, h_s)
             
+        # paired_global_feat = torch.cat([hs_dec_output[ :, 0, :], ht_dec_output[ :, 0, :]], dim=-2).to(hs_dec_output.device)
+        # paired_global_feat = self.scaled_mlp(paired_global_feat)
         
         #Encoder-Decoder
         # hs_dec_output = hs_dec_output[:, 1:, :]
@@ -348,13 +395,119 @@ class MatchARNet(utils.backbone.VGG16_bn):
         hs_dec_output = hs_dec_output[:, 1:, :]
         ht_dec_output = ht_dec_output[:, 1:, :]
         
-        
-        sim_score = self.w_cosine(hs_dec_output, ht_dec_output) 
-        
+        prototype_score = []
         
         
-        return sim_score, hs_dec_output, ht_dec_output #gloabl_feat_score  #target_points, hs_dec_output
+        # h_t_norm = cosine_norm(h_t)
+        # print(hs_dec_output.size(), ht_dec_output.size())
         
+        sim_score = self.w_cosine(hs_dec_output, ht_dec_output) #self.w_cosine(hs_dec_output, h_t_norm)
+        
+        sim_score_all = torch.tensor([]) #self.w_cosine(hs_dec_output_, ht_dec_output_)
+        
+        
+        return sim_score, sim_score_all, prototype_score, hs_dec_output, ht_dec_output #gloabl_feat_score  #target_points, hs_dec_output
+        
+
+
+class MLP_prototype(nn.Module):
+    def __init__(self, model_dim):
+        super(MLP_prototype, self).__init__()
+        self.layer1 = nn.Linear(model_dim * 2, model_dim)
+
+    def forward(self, x, dropout=None):
+        # Feedforward
+        x = self.layer1(x)
+        if dropout is not None:
+            x = torch.nn.functional.dropout(x, p=dropout)
+        
+        # if self.l2_scaling:
+        #     # Apply L2 normalization to the final layer output
+        #     output = F.normalize(output, p=2, dim=-1)
+        return x
+
+
+class MLP(nn.Module):
+    def __init__(self, h_sizes, out_size, l2_scaling):
+        super(MLP, self).__init__()
+        self.hidden = nn.ModuleList()
+        self.l2_scaling = l2_scaling
+        for k in range(len(h_sizes) - 1):
+            self.hidden.append(nn.Linear(h_sizes[k], h_sizes[k + 1]))
+        self.out = nn.Linear(h_sizes[-1], out_size)
+
+    def forward(self, x):
+        # Feedforward
+        for layer in self.hidden:
+            x = layer(x)
+            x = F.relu(x)
+        output = self.out(x)
+        # if self.l2_scaling:
+        #     # Apply L2 normalization to the final layer output
+        #     output = F.normalize(output, p=2, dim=-1)
+        return output 
+
+class MLP(nn.Module):
+    def __init__(self, h_sizes, out_size, l2_scaling):
+        super(MLP, self).__init__()
+        self.hidden = nn.ModuleList()
+        self.l2_scaling = l2_scaling
+        for k in range(len(h_sizes) - 1):
+            self.hidden.append(nn.Linear(h_sizes[k], h_sizes[k + 1]))
+        self.out = nn.Linear(h_sizes[-1], out_size)
+
+    def forward(self, x):
+        # Feedforward
+        for layer in self.hidden:
+            x = layer(x)
+            x = F.relu(x)
+        output = self.out(x)
+        # if self.l2_scaling:
+        #     # Apply L2 normalization to the final layer output
+        #     output = F.normalize(output, p=2, dim=-1)
+        return output
+# class MLP(nn.Module):
+#     def __init__(self, h_sizes, out_size, batch_norm):
+#         super(MLP, self).__init__()
+#         self.hidden = nn.ModuleList()
+#         self.bn_layers = nn.ModuleList()
+#         self.batch_norm = batch_norm
+#         for k in range(len(h_sizes)-1):
+#             self.hidden.append(nn.Linear(h_sizes[k], h_sizes[k+1]))
+#             if batch_norm:
+#                 self.bn_layers.append(nn.BatchNorm1d(h_sizes[k+1]))
+#         self.out = nn.Linear(h_sizes[-1], out_size)
+    
+#     def forward(self, x):
+
+#         # Feedforward
+#         for i in range(len(self.hidden)):
+#             if self.batch_norm:
+#                 x = torch.transpose(self.bn_layers[i](torch.transpose(self.hidden[i](x),1,2)),1,2)
+#             else:
+#                     x = self.hidden[i](x)
+#             x = nn.functional.relu(x)
+#         output = self.out(x)
+#         return output
+
+class MLPQuery(nn.Module):
+    def __init__(self, node_dim, hidden_size, hidden_out, batch_norm):
+        super(MLPQuery, self).__init__()
+        self.lin1 = nn.Linear(2 * node_dim, hidden_size)
+        self.batch_norm = batch_norm
+        if batch_norm:
+            self.bn = nn.BatchNorm1d(hidden_size)
+        self.lin2 = nn.Linear(hidden_size, hidden_out)
+
+    def forward(self, x):
+            x = self.lin1(x)
+            if self.batch_norm:
+                x = self.bn(torch.transpose(x, 1, 2))
+                x = torch.transpose(x, 1, 2)
+            x = nn.functional.relu(x)
+            out = self.lin2(x)
+            return out
+
 
 
 class PairwiseWeightedCosineSimilarity(nn.Module):
@@ -387,3 +540,46 @@ class PairwiseWeightedCosineSimilarity(nn.Module):
         
         return cosine_similarity
         
+class MLP_scaled(nn.Module):
+    """
+    Multilayer Perceptron (MLP) module with optional gating and dropout.
+
+    Args:
+        input_dim (int): Dimension of the input features.
+        hidden_dim (int): Dimension of the hidden layer.
+        output_dim (int): Dimension of the output features.
+        device (str or torch.device): Device to run the module on.
+    """
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        output_dim: int,
+        device = None
+    ):
+        super().__init__()
+        self.device = (('cuda' if torch.cuda.is_available() else
+                        'mps' if torch.backends.mps.is_available() else 'cpu')
+                        if device is None else device)
+
+        # the up, down, and gate projections
+        self.lin1 = nn.Linear(input_dim, hidden_dim, bias=False, device=self.device)
+        self.relu = nn.ReLU()
+        self.lin2 = nn.Linear(hidden_dim, output_dim, bias=False, device=self.device)
+        
+
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the MLP module.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, input_dim).
+
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, seq_len, output_dim).
+        """
+        x_ = self.lin1(x)
+        x_ = self.relu(x_)
+        x_ = self.lin2(x_)
+        return x_
