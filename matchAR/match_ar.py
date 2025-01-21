@@ -185,18 +185,10 @@ class MatchARNet(utils.backbone.VGG16_bn):
         
         # self.prot_MLP = MLP_prototype(cfg.Matching_TF.d_model)
         
-        self.mlp_out = MLP([cfg.Matching_TF.d_model, 384], cfg.Matching_TF.d_model, l2_scaling=False)
-        # self.mlp_out_2 = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, l2_scaling=True)
-        # self.mlp_out = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, batch_norm=False)
-        # self.mlp_out_2 = MLP([cfg.Matching_TF.d_model, 512, 1024], 512, batch_norm=False)
         self.w_cosine = PairwiseWeightedCosineSimilarity(cfg.Matching_TF.d_model)
         
         self.global_state_dim = 1024
-
-        # matched encoding
-        # self.matched_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
-        # mask_match encoding
-        # self.mask_match_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
+        
     
     def normalize_linear(self, module):
         """
@@ -466,29 +458,6 @@ class MLP(nn.Module):
         #     # Apply L2 normalization to the final layer output
         #     output = F.normalize(output, p=2, dim=-1)
         return output
-# class MLP(nn.Module):
-#     def __init__(self, h_sizes, out_size, batch_norm):
-#         super(MLP, self).__init__()
-#         self.hidden = nn.ModuleList()
-#         self.bn_layers = nn.ModuleList()
-#         self.batch_norm = batch_norm
-#         for k in range(len(h_sizes)-1):
-#             self.hidden.append(nn.Linear(h_sizes[k], h_sizes[k+1]))
-#             if batch_norm:
-#                 self.bn_layers.append(nn.BatchNorm1d(h_sizes[k+1]))
-#         self.out = nn.Linear(h_sizes[-1], out_size)
-    
-#     def forward(self, x):
-
-#         # Feedforward
-#         for i in range(len(self.hidden)):
-#             if self.batch_norm:
-#                 x = torch.transpose(self.bn_layers[i](torch.transpose(self.hidden[i](x),1,2)),1,2)
-#             else:
-#                     x = self.hidden[i](x)
-#             x = nn.functional.relu(x)
-#         output = self.out(x)
-#         return output
 
 class MLPQuery(nn.Module):
     def __init__(self, node_dim, hidden_size, hidden_out, batch_norm):
