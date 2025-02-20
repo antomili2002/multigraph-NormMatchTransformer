@@ -230,26 +230,6 @@ class MatchARNet(utils.backbone.VGG16_bn):
             if isinstance(module, (nn.Linear, nn.Embedding)):
                 self.normalize_linear(module)
     
-    # def update_queries(self, Q, in_training, eval_pred_points, n_points, all_targets):
-    #     if in_training is True:
-    #         return Q
-    #     B, _, _ = Q.size()
-    #     new_queries = Q
-    #     for i in range(B):
-    #         new_queries[i, n_points[i]:, :] = 0
-        
-    #     if len(eval_pred_points[0]) > 0:
-    #         for i in range(B):
-    #             current_n_points = n_points[i]
-    #             predicted_targets = eval_pred_points[i]
-    #             selected_targets = all_targets[i,predicted_targets, :]
-    #             print("----------------")
-    #             print(predicted_targets)
-    #             print(selected_targets.size(), selected_targets)
-    #             new_queries[i, current_n_points:(current_n_points+len(predicted_targets)), :] = selected_targets
-                
-                
-    #     return new_queries
     
     
     def update_order(self, source_nodes, input_order):
@@ -323,18 +303,6 @@ class MatchARNet(utils.backbone.VGG16_bn):
 
             global_feature_mask = torch.tensor([True]).unsqueeze(0).expand(h_res.size(0), -1).to(global_feature.device)
             mask = torch.cat([global_feature_mask, mask], dim=1)
-            
-            # global_feature = cosine_norm(global_feature).squeeze(1).unsqueeze(0)
-            # if cfg.Matching_TF.global_feat:
-            #     # with torch.no_grad():
-            #     global_feature = self.final_layers(edges)[0].reshape((nodes.shape[0], -1))
-            #     global_feature = self.glob_to_node_dim(global_feature)
-            #     global_feature = global_feature + self.cls_enc
-            #     global_feature = global_feature.unsqueeze(1).expand(-1,1, -1)
-            #     h_res = torch.cat([global_feature, h_res], dim=1)
-
-            #     global_feature_mask = torch.tensor([True]).unsqueeze(0).expand(h_res.size(0), -1).to(global_feature.device)
-            #     mask = torch.cat([global_feature_mask, mask], dim=1)
 
 
             orig_graph_list.append((h_res,mask))
