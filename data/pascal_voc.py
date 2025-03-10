@@ -429,11 +429,7 @@ class PascalVOC:
                 for j, _keypoint in enumerate(s2["keypoints"]):
                     if keypoint["name"] == _keypoint["name"]:
                         perm_mat_list[n][i, j] = 1
-        # print("----------------------------------------------------")
-        # print(anno_list)
-        # print("----------------------------------------------------")
-        # print(perm_mat_list)
-        # br
+        
         return anno_list, perm_mat_list
 
     def get_pair_superset(self, cls=None, shuffle=True, num_iterations=200):

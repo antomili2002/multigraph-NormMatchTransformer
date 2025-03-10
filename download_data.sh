@@ -23,7 +23,7 @@ echo -e "\e[32m... done\e[0m"
 
 echo -e "\e[1mGetting WILLOW data\e[0m"
 cd ../WILLOW
-wget http://www.di.ens.fr/willow/research/graphlearning/WILLOW-ObjectClass_dataset.zip
+wget https://www.di.ens.fr/willow/research/graphlearning/WILLOW-ObjectClass_dataset.zip
 unzip WILLOW-ObjectClass_dataset.zip
 echo -e "\e[32m... done\e[0m"
 

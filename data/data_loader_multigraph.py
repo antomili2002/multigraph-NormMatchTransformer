@@ -36,11 +36,8 @@ class GMDataset(Dataset):
         # if length is None the length is set to the size of the ds
         self.obj_size = self.ds.obj_resize
         self.classes = self.ds.classes
-        self.cls = None
-        #TODO: Hard-coded to 2 graphs  
-        self.num_graphs_in_matching_instance = 2
-        
-        
+        self.cls = None  
+        self.num_graphs_in_matching_instance = None
         self.added_data = []
 
     def set_cls(self, cls):
@@ -83,9 +80,6 @@ class GMDataset(Dataset):
 
         points_gt = [np.array([(kp["x"], kp["y"]) for kp in anno_dict["keypoints"]]) for anno_dict in anno_list]
         n_points_gt = [len(p_gt) for p_gt in points_gt]
-        # print(points_gt)
-        # print("----------------------------------------------------------------")
-        # print(n_points_gt)
         
         graph_list = []
         for p_gt, n_p_gt in zip(points_gt, n_points_gt):
@@ -122,67 +116,6 @@ class GMDataset(Dataset):
             ret_dict["features"] = [torch.Tensor(x) for x in feat_list]
 
         return ret_dict
-        # if idx is not None:
-        #     if idx < self.length:
-        #         anno_list, perm_mat_list = self.ds.get_k_samples(idx, k=self.num_graphs_in_matching_instance, cls=self.cls, mode=sampling_strategy)
-                
-        #         """
-        #         Implement Random Swap here
-        #         """
-        #         for perm_mat in perm_mat_list:
-        #             if (
-        #                 not perm_mat.size
-        #                 or (perm_mat.size < 2 * 2 and sampling_strategy == "intersection")
-        #                 and not self.true_epochs
-        #             ):
-        #                 # 'and not self.true_epochs' because we assume all data is valid when sampling a true epoch
-        #                 next_idx = None if idx is None else idx + 1
-        #                 return self.__getitem__(next_idx)
-
-        #         points_gt = [np.array([(kp["x"], kp["y"]) for kp in anno_dict["keypoints"]]) for anno_dict in anno_list]
-        #         n_points_gt = [len(p_gt) for p_gt in points_gt]
-        #         # print(points_gt)
-        #         # print("----------------------------------------------------------------")
-        #         # print(n_points_gt)
-                
-        #         graph_list = []
-        #         for p_gt, n_p_gt in zip(points_gt, n_points_gt):
-        #             edge_indices, edge_features = build_graphs(p_gt, n_p_gt)
-
-        #             # Add dummy node features so the __slices__ of them is saved when creating a batch
-        #             pos = torch.tensor(p_gt).to(torch.float32) / 256.0
-        #             assert (pos > -1e-5).all(), p_gt
-        #             graph = Data(
-        #                 edge_attr=torch.tensor(edge_features).to(torch.float32),
-        #                 edge_index=torch.tensor(edge_indices, dtype=torch.long),
-        #                 x=pos,
-        #                 pos=pos,
-        #             )
-        #             graph.num_nodes = n_p_gt
-        #             graph_list.append(graph)
-
-        #         ret_dict = {
-        #             "Ps": [torch.Tensor(x) for x in points_gt],
-        #             "ns": [torch.tensor(x) for x in n_points_gt],
-        #             "gt_perm_mat": perm_mat_list,
-        #             "edges": graph_list,
-        #         }
-
-        #         imgs = [anno["image"] for anno in anno_list]
-        #         if imgs[0] is not None:
-        #             trans = transforms.Compose([transforms.ToTensor(), transforms.Normalize(cfg.NORM_MEANS, cfg.NORM_STD)])
-        #             imgs = [trans(img) for img in imgs]
-        #             ret_dict["images"] = imgs
-        #         elif "feat" in anno_list[0]["keypoints"][0]:
-        #             feat_list = [np.stack([kp["feat"] for kp in anno_dict["keypoints"]], axis=-1) for anno_dict in anno_list]
-        #             ret_dict["features"] = [torch.Tensor(x) for x in feat_list]
-
-        #         return ret_dict
-        #     else:
-        #         pass
-    
-    def inject_error_data(self, ret_dict, error_indices):
-        pass
 
 
 def collate_fn(data: list):

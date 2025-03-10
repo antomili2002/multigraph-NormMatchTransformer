@@ -120,10 +120,10 @@ class SPair71k:
         :param shuffle: random shuffle the keypoints
         :return: (k samples of data, k \choose 2 groundtruth permutation matrices)
         """
-        if k != 2:
-            raise NotImplementedError(
-                f"No strategy implemented to sample {k} graphs from SPair dataset. So far only k=2 is possible."
-            )
+        #if k != 2:
+        #    raise NotImplementedError(
+        #        f"No strategy implemented to sample {k} graphs from SPair dataset. So far only k=2 is possible."
+        #    )
 
         if cls is None:
             cls = self.classes[random.randrange(0, len(self.classes))]
@@ -150,7 +150,7 @@ class SPair71k:
             assert cls == category
         assert all(annotation[key] == value for key, value in self.difficulty_params.items())
 
-        if mode == "intersection":
+        if mode == "intersection" and k == 2:
             assert len(annotation["src_kps"]) == len(annotation["trg_kps"])
             num_kps = len(annotation["src_kps"])
             perm_mat_init = np.eye(num_kps)

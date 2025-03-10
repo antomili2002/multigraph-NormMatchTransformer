@@ -422,7 +422,10 @@ if __name__ == "__main__":
     image_dataset = {
         x: GMDataset(cfg.DATASET_NAME, sets=x, length=dataset_len[x], obj_resize=(256, 256)) for x in ("train", "test")
     }
-    
+
+    image_dataset["train"].set_num_graphs(cfg.TRAIN.num_graphs_in_matching_instance)
+    image_dataset["test"].set_num_graphs(cfg.EVAL.num_graphs_in_matching_instance)
+
     sampler = {
     "train": DistributedSampler(image_dataset["train"]),
     "test": DistributedSampler(image_dataset["test"])
@@ -430,22 +433,7 @@ if __name__ == "__main__":
     
     dataloader = {x: get_dataloader(image_dataset[x],sampler[x], fix_seed=(x == "test")) for x in ("train", "test")}
 
-    # torch.cuda.set_device(0)
-    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    if cfg.MODEL_ARCH == 'tf':
-        model = Net()
-    elif cfg.MODEL_ARCH == 'mlp':
-        model = SimpleNet()
-    elif cfg.MODEL_ARCH == 'enc':
-        model = EncoderNet()
-    elif cfg.MODEL_ARCH == 'res':
-        model = ResMatcherNet()
-    elif cfg.MODEL_ARCH == 'ar':
-        model = MatchARNet()
-        
-    
-    
+    model = MatchARNet()    
     
     torch.cuda.set_device(local_rank)
     device = torch.device(f'cuda:{local_rank}')
@@ -453,7 +441,6 @@ if __name__ == "__main__":
     model = model.to(device)
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
-    # criterion = torch.nn.CrossEntropyLoss()
     criterion = InfoNCE_Loss(temperature=cfg.TRAIN.temperature)
     backbone_params = list(model.module.node_layers.parameters()) + list(model.module.edge_layers.parameters())
     

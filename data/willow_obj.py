@@ -76,7 +76,7 @@ class WillowObject(BaseDataset):
             cls = self.classes.index(cls)
         assert type(cls) == int and 0 <= cls < len(self.classes)
 
-        if mode == "superset" and k == 2:
+        if mode == "superset" and k == 2: # only works with pairs
             anno_list, perm_mat = self.get_pair_superset(cls=cls, shuffle=shuffle, num_iterations=num_iterations)
             return anno_list, [perm_mat]
 
@@ -102,18 +102,28 @@ class WillowObject(BaseDataset):
                         break
             if mode == "all":
                 pass
-            elif mode == "rectangle" and k == 2:  # so far only implemented for k = 2
-                row_list.sort()
-                perm_mat_list[n] = perm_mat_list[n][row_list, :]
-                s1["keypoints"] = [s1["keypoints"][i] for i in row_list]
-                assert perm_mat_list[n].size == len(s1["keypoints"]) * len(s2["keypoints"])
-            elif mode == "intersection" and k == 2:  # so far only implemented for k = 2
-                row_list.sort()
-                col_list.sort()
-                perm_mat_list[n] = perm_mat_list[n][row_list, :]
-                perm_mat_list[n] = perm_mat_list[n][:, col_list]
-                s1["keypoints"] = [s1["keypoints"][i] for i in row_list]
-                s2["keypoints"] = [s2["keypoints"][j] for j in col_list]
+            elif mode == "rectangle":
+                if k == 2:
+                    row_list.sort()
+                    perm_mat_list[n] = perm_mat_list[n][row_list, :]
+                    s1["keypoints"] = [s1["keypoints"][i] for i in row_list]
+                    assert perm_mat_list[n].size == len(s1["keypoints"]) * len(s2["keypoints"])
+                else:
+                    for s in anno_list:
+                        s["keypoints"].sort(key=lambda kp: kp["x"])  # Sort keypoints by x-coordinates
+            elif mode == "intersection":
+                if k == 2:
+                    row_list.sort()
+                    col_list.sort()
+                    perm_mat_list[n] = perm_mat_list[n][row_list, :]
+                    perm_mat_list[n] = perm_mat_list[n][:, col_list]
+                    s1["keypoints"] = [s1["keypoints"][i] for i in row_list]
+                    s2["keypoints"] = [s2["keypoints"][j] for j in col_list]
+                else:
+                     # For k > 2, find common keypoints across all images
+                    common_kp_names = set.intersection(*(set([kp["name"] for kp in s["keypoints"]]) for s in anno_list))
+                    for s in anno_list:
+                        s["keypoints"] = [kp for kp in s["keypoints"] if kp["name"] in common_kp_names]
             else:
                 raise NotImplementedError(f"Unknown sampling strategy {mode}")
 
