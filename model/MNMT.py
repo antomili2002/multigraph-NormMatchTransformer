@@ -5,17 +5,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.utils import to_dense_batch
 from scipy.optimize import linear_sum_assignment
+from matplotlib import pyplot as plt
 
 import utils.backbone
-from matchAR.sconv_archs import SConv
-from matchAR.positionalEmbedding import Pointwise2DPositionalEncoding
+from model.sconv_archs import SConv
+from model.positionalEmbedding import Pointwise2DPositionalEncoding
 from utils.config import cfg
 from utils.feature_align import feature_align
 from utils.utils import lexico_iter
 from utils.evaluation_metric import make_perm_mat_pred
 from utils.visualization import easy_visualize
-from matchAR.nGPT_decoder import NGPT_DECODER
-from matchAR.nGPT_encoder import NGPT_ENCODER
+from model.nGPT_decoder import NGPT_DECODER
+from model.nGPT_encoder import NGPT_ENCODER
 
 
 def normalize_over_channels(x):
@@ -138,31 +139,18 @@ class ModelConfig:
     num_heads: int = 4 # number of heads in the multi-head attention mechanism
     mlp_hidden_mult: float = 4
 
-class MatchARNet(utils.backbone.VGG16_bn):
-    def __init__(self):
-        super(MatchARNet, self).__init__()
+class MNMT(utils.backbone.VGG16_bn):
+    def __init__(self, num_graphs):
+        super(MNMT, self).__init__()
         self.model_name = 'Transformer'
+        self.num_graphs = num_graphs
         self.psi = SConv(input_features=cfg.SPLINE_CNN.input_features, output_features=cfg.Matching_TF.d_model)
         # self.mlp = MLPQuery(cfg.Matching_TF.d_model, 1024, cfg.Matching_TF.d_model, batch_norm=cfg.Matching_TF.batch_norm)
         
         self.vgg_to_node_dim = nn.Linear(cfg.SPLINE_CNN.input_features, cfg.Matching_TF.d_model)
         self.glob_to_node_dim = nn.Linear(512, cfg.Matching_TF.d_model)
-
-        self.s_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
-        self.t_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
-        self.cls_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
-        # self.scaled_mlp = MLP_scaled(cfg.Matching_TF.d_model*2, cfg.Matching_TF.d_model//2, cfg.Matching_TF.d_model)      
         
         self.pos_encoding = Pointwise2DPositionalEncoding(cfg.Matching_TF.d_model, 256, 256).cuda()
-
-        # self.tf_encoder_layer = nn.TransformerEncoderLayer(d_model= cfg.Matching_TF.d_model, 
-        #                                                    nhead= cfg.Matching_TF.n_head, 
-        #                                                    batch_first=True)
-        # self.tf_decoder_layer = nn.TransformerDecoderLayer(d_model= cfg.Matching_TF.d_model,
-        #                                                    nhead=cfg.Matching_TF.n_head,
-        #                                                    batch_first=True)
-        # self.tf_encoder = nn.TransformerEncoder(self.tf_encoder_layer, num_layers=cfg.Matching_TF.n_encoder)
-        # self.tf_decoder = nn.TransformerDecoder(self.tf_decoder_layer, num_layers=cfg.Matching_TF.n_decoder)
         
         nGPT_decoder_config = ModelConfig()
         nGPT_decoder_config.dim = cfg.Matching_TF.d_model
@@ -171,23 +159,12 @@ class MatchARNet(utils.backbone.VGG16_bn):
         nGPT_decoder_config.mlp_hidden_mult = cfg.Matching_TF.nGPT_mlp_hidden_mult
         self.n_gpt_decoder = NGPT_DECODER(nGPT_decoder_config)
         
-        self.n_gpt_decoder_2 = NGPT_DECODER(nGPT_decoder_config)
-        # self.n_gpt_decoder_2.load_state_dict(self.n_gpt_decoder.state_dict())
-        
-        # self.anchorMLP = MLP_scaled(cfg.Matching_TF.d_model*2, cfg.Matching_TF.d_model//3, 1)
-        
-        # nGPT_encoder_config = ModelConfig()
-        # nGPT_encoder_config.dim = cfg.Matching_TF.d_model
-        # nGPT_encoder_config.num_layers = cfg.Matching_TF.n_encoder
-        # nGPT_encoder_config.num_heads = cfg.Matching_TF.n_head # number of heads in the multi-head attention mechanism
-        # nGPT_encoder_config.mlp_hidden_mult = cfg.Matching_TF.nGPT_mlp_hidden_mult
-        # self.n_gpt_encoder = NGPT_ENCODER(nGPT_encoder_config)
-        
-        # self.prot_MLP = MLP_prototype(cfg.Matching_TF.d_model)
+        self.graph_decoders = nn.ModuleList([NGPT_DECODER(nGPT_decoder_config) for _ in range(num_graphs)])
         
         self.w_cosine = PairwiseWeightedCosineSimilarity(cfg.Matching_TF.d_model)
         
-        self.global_state_dim = 1024
+        self.attention_maps = [] # for visualization
+        self.masks_viz_counter = 0
         
     
     def normalize_linear(self, module):
@@ -214,17 +191,12 @@ class MatchARNet(utils.backbone.VGG16_bn):
         #     layer.alpha_A.s.data.abs_()
         #     layer.alpha_M.s.data.abs_()
             
-        for layer in self.n_gpt_decoder.layers:
-            layer.alpha_A.s.data.abs_()
-            layer.alpha_C.s.data.abs_()
-            layer.alpha_G.s.data.abs_()
-            layer.alpha_M.s.data.abs_()
-        
-        for layer in self.n_gpt_decoder_2.layers:
-            layer.alpha_A.s.data.abs_()
-            layer.alpha_C.s.data.abs_()
-            layer.alpha_G.s.data.abs_()
-            layer.alpha_M.s.data.abs_()
+        for decoder in self.graph_decoders:
+            for layer in decoder.layers:
+                layer.alpha_A.s.data.abs_()
+                layer.alpha_C.s.data.abs_()
+                layer.alpha_G.s.data.abs_()
+                layer.alpha_M.s.data.abs_()
         # Cosine normalize relevant Linear layers
         for module in self.modules():
             if isinstance(module, (nn.Linear, nn.Embedding)):
@@ -247,23 +219,14 @@ class MatchARNet(utils.backbone.VGG16_bn):
         n_points,
         n_points_sample, 
         perm_mats,
-        eval_pred_points=None,
         in_training=True,
-        input_order=None,
-        matched_points_mask=None,
-        matched_padding_mask_hs=None,
-        matched_padding_mask_ht=None,
     ):
         batch_size = graphs[0].num_graphs
-        global_list = []
         orig_graph_list = []
-        node_feat_list = []
+        encoded_graphs, masks = [], []
         # for visualisation purposes only
         graph_list = []
-        global_feat = 0
         for image, p, n_p, graph in zip(images, points, n_points, graphs):
-            # extract feature
-            # with torch.no_grad():
             nodes = self.node_layers(image)
             edges = self.edge_layers(nodes)
             
@@ -273,8 +236,8 @@ class MatchARNet(utils.backbone.VGG16_bn):
             # arrange features
             U = concat_features(feature_align(nodes, p, n_p, (256, 256)), n_p)
             F = concat_features(feature_align(edges, p, n_p, (256, 256)), n_p)
-
             node_features = torch.cat((U, F), dim=-1)
+
             graph.x = node_features
             # for visualisation purposes only
             graph_list.append(graph.to_data_list())
@@ -303,73 +266,61 @@ class MatchARNet(utils.backbone.VGG16_bn):
 
             global_feature_mask = torch.tensor([True]).unsqueeze(0).expand(h_res.size(0), -1).to(global_feature.device)
             mask = torch.cat([global_feature_mask, mask], dim=1)
-
+            
+            encoded_graphs.append(h_res)
+            masks.append(mask)
 
             orig_graph_list.append((h_res,mask))
 
-        h_s, s_mask = orig_graph_list[0]
-        h_t, t_mask = orig_graph_list[1]
+        decoded_graphs = []
+        self.attention_maps.clear()
 
-        assert h_s.size(0) == h_t.size(0), 'batch-sizes are not equal'
-        
-        
-        
-        batch_size, seq_len, _ = h_s.shape
-        padding_mask = torch.zeros((batch_size, seq_len, seq_len), dtype=torch.bool).to(h_s.device)
-        if in_training is True:
-            for idx, e in enumerate(n_points_sample):
-                if cfg.Matching_TF.global_feat:
-                    s_mask[idx, e+1:] = False
-                    h_s[idx, e+1:, :] = 0
-                    
-                    t_mask[idx, e+1:] = False
-                    h_t[idx, e+1:, :] = 0
-                    
-                    padding_mask[idx, :, e+1:] = 1
-                    padding_mask[idx, e+1:, :] = 1
-                else:
-                    s_mask[idx, e:] = False
-                    h_s[idx, e:, :] = 0
-                    
-                    t_mask[idx, e:] = False
-                    h_t[idx, e:, :] = 0
-          
-        
-            
-        
-        source_points_mask = torch.zeros(seq_len, seq_len, dtype=torch.bool).to(h_t.device)
-        hs_dec_output = self.n_gpt_decoder(h_s, source_points_mask, padding_mask, h_t)
-        
-        ht_decoder_mask = torch.zeros(seq_len, seq_len, dtype=torch.bool).to(h_t.device)
-        ht_dec_output = self.n_gpt_decoder_2(h_t, ht_decoder_mask, padding_mask, h_s)
-            
-        # paired_global_feat = torch.cat([hs_dec_output[ :, 0, :], ht_dec_output[ :, 0, :]], dim=-2).to(hs_dec_output.device)
-        # paired_global_feat = self.scaled_mlp(paired_global_feat)
-        
-        #Encoder-Decoder
-        # hs_dec_output = hs_dec_output[:, 1:, :]
-        # target_points = cosine_norm(target_points)
-        # ht_dec_output = target_points[:, 1:, :]
-        
-        #Decoder-Decoder
-        hs_dec_output = hs_dec_output[:, 1:, :]
-        ht_dec_output = ht_dec_output[:, 1:, :]
-        
-        prototype_score = []
-        
-        
-        # h_t_norm = cosine_norm(h_t)
-        # print(hs_dec_output.size(), ht_dec_output.size())
-        
-        sim_score = self.w_cosine(hs_dec_output, ht_dec_output) #self.w_cosine(hs_dec_output, h_t_norm)
-        
-        sim_score_all = torch.tensor([]) #self.w_cosine(hs_dec_output_, ht_dec_output_)
-        
-        
-        return sim_score, sim_score_all, prototype_score, hs_dec_output, ht_dec_output #gloabl_feat_score  #target_points, hs_dec_output
-        
+        for i in range(self.num_graphs):
+            decoder = self.graph_decoders[i]
+            memory = torch.cat([encoded_graphs[j] for j in range(self.num_graphs) if j != i], dim=0)
+            memory_mask = torch.cat([masks[j] for j in range(self.num_graphs) if j != i], dim=0)
 
+            target = encoded_graphs[i]
+            target_mask = masks[i]
+            tgt_len = target.size(1)
 
+            # Autoregressive causal mask
+            if in_training:
+                causal_mask = torch.triu(torch.ones((tgt_len, tgt_len), device=target.device), diagonal=1).bool()
+                self.visualize_mask(causal_mask.cpu(), f"causal_mask_graph_{i}_step_{self.mask_viz_counter}.png")
+                self.visualize_mask(target_mask[0].cpu().unsqueeze(0), f"target_padding_mask_graph_{i}_step_{self.mask_viz_counter}.png")
+                self.visualize_mask(memory_mask[0].cpu().unsqueeze(0), f"memory_padding_mask_graph_{i}_step_{self.mask_viz_counter}.png")
+            else:
+                causal_mask = None
+
+            dec_out, self_attn_weights, cross_attn_weights = decoder(
+                tgt=target,
+                memory=memory,
+                memory_key_padding_mask=memory_mask,
+                tgt_key_padding_mask=target_mask,
+                tgt_mask=causal_mask,
+                return_attention=True
+            )
+            decoded_graphs.append(dec_out[:, 1:, :])
+
+            self.attention_maps.append({
+                'graph_idx': i,
+                'self_attention': self_attn_weights,
+                'cross_attention': cross_attn_weights
+            })
+
+        self.mask_viz_counter += 1
+        return decoded_graphs, self.attention_maps
+
+    def visualize_mask(self, mask_tensor, filename):
+            plt.figure(figsize=(5, 5))
+            plt.imshow(mask_tensor.numpy(), cmap='gray', interpolation='nearest')
+            plt.title(filename)
+            plt.colorbar()
+            plt.tight_layout()
+            plt.savefig(f"attention_masks/{filename}")
+            plt.close()
+        
 class MLP_prototype(nn.Module):
     def __init__(self, model_dim):
         super(MLP_prototype, self).__init__()
@@ -476,47 +427,3 @@ class PairwiseWeightedCosineSimilarity(nn.Module):
         #cosine_similarity = torch.clamp(cosine_similarity, -1 + epsilon, 1 - epsilon)
         
         return cosine_similarity
-        
-class MLP_scaled(nn.Module):
-    """
-    Multilayer Perceptron (MLP) module with optional gating and dropout.
-
-    Args:
-        input_dim (int): Dimension of the input features.
-        hidden_dim (int): Dimension of the hidden layer.
-        output_dim (int): Dimension of the output features.
-        device (str or torch.device): Device to run the module on.
-    """
-    def __init__(
-        self,
-        input_dim: int,
-        hidden_dim: int,
-        output_dim: int,
-        device = None
-    ):
-        super().__init__()
-        self.device = (('cuda' if torch.cuda.is_available() else
-                        'mps' if torch.backends.mps.is_available() else 'cpu')
-                        if device is None else device)
-
-        # the up, down, and gate projections
-        self.lin1 = nn.Linear(input_dim, hidden_dim, bias=False, device=self.device)
-        self.relu = nn.ReLU()
-        self.lin2 = nn.Linear(hidden_dim, output_dim, bias=False, device=self.device)
-        
-
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of the MLP module.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, input_dim).
-
-        Returns:
-            torch.Tensor: Output tensor of shape (batch_size, seq_len, output_dim).
-        """
-        x_ = self.lin1(x)
-        x_ = self.relu(x_)
-        x_ = self.lin2(x_)
-        return x_

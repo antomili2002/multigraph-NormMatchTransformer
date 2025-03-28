@@ -47,7 +47,7 @@
     "reduced_vis": true
   },
   "evaluate_only": false,
-  "model_dir": "./results/voc_basic/matchAR_corrected_mask",
+  "model_dir": "./results/voc_basic/NMT",
   "log_dir": "runs/",
   "MODEL_ARCH": "ar"
 }

@@ -22,7 +22,7 @@ from datetime import timedelta
 from sklearn.metrics import f1_score
 from data.data_loader_multigraph import GMDataset, get_dataloader
 import eval
-from matchAR import Net, SimpleNet, EncoderNet, ResMatcherNet, MatchARNet
+from model import NMT
 from utils.config import cfg
 from utils.utils import update_params_from_cmdline, compute_grad_norm
 from utils.evaluation_metric import calculate_correct_and_valid, calculate_f1_score, get_pos_neg, get_pos_neg_from_lists
@@ -148,6 +148,8 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         if local_rank == output_rank:
             print(f"Evaluating without training...")
             evaluation_epoch = 13
+
+            all_error_dict = {}
             accs, f1_scores, error_dict = eval.eval_model(model, dataloader["test"], local_rank, output_rank, eval_epoch=evaluation_epoch)
             all_error_dict[evaluation_epoch] = error_dict
             acc_dict = {
@@ -404,7 +406,7 @@ if __name__ == "__main__":
     if local_rank == output_rank:
         wandb.init(
         # set the wandb project where this run will be logged
-        project="matchAR",
+        project="NMT",
         
         # track hyperparameters and run metadata
         config={
@@ -433,7 +435,7 @@ if __name__ == "__main__":
     
     dataloader = {x: get_dataloader(image_dataset[x],sampler[x], fix_seed=(x == "test")) for x in ("train", "test")}
 
-    model = MatchARNet()    
+    model = NMT()    
     
     torch.cuda.set_device(local_rank)
     device = torch.device(f'cuda:{local_rank}')
