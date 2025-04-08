@@ -28,65 +28,6 @@ def concat_features(embeddings, num_vertices):
     res = torch.cat([embedding[:, :num_v] for embedding, num_v in zip(embeddings, num_vertices)], dim=-1)
     return res.transpose(0, 1)
 
-def make_queries(h_s, h_t):
-    n_s = h_s.size(dim=1)
-    n_t = h_t.size(dim=1)
-
-    queries = []
-
-    for i in range(0,n_s):
-        for j in range(0, n_t):
-            query = torch.cat((h_s[:,i,:], h_t[:,j,:]), dim=-1)
-            queries.append(query)
-    queries = torch.stack(queries, dim=1)
-    
-    return queries
-
-def pad_input(input_tensor, target_length=40):
-    """
-    Pads the input tensor to match the target length in the data point dimension.
-    
-    Parameters:
-    - input_tensor: Input tensor of shape [batch_size, current_length, feature_dim].
-    - target_length: The desired length for padding.
-
-    Returns:
-    - Padded tensor of shape [batch_size, target_length, feature_dim].
-    """
-    current_length = input_tensor.size(1)
-    if current_length >= target_length:
-        return input_tensor  # No padding needed if current length meets or exceeds target length
-
-    # Padding to the right along the data point dimension (dim=1)
-    padding_size = target_length - current_length
-    padded_tensor = F.pad(input_tensor, (0, 0, 0, padding_size), "constant", 0)
-    return padded_tensor
-
-def create_source_masks(source_points, n_points, max_length=40):
-    """
-    Create masks for the source points tensor used in the TransformerDecoder.
-
-    Parameters:
-    - source_points: Tensor of shape [batch_size, seq_len, feature_dim].
-    - n_points: List or tensor indicating the original length of each sequence before padding.
-    - max_length: The maximum sequence length (after padding).
-
-    Returns:
-    - source_points_mask: Upper triangular mask of shape [seq_len, seq_len] (or None if not needed).
-    - source_key_padding_mask: Padding mask of shape [batch_size, max_length].
-    """
-    batch_size, seq_len, _ = source_points.size()
-
-    # Create target mask (if needed for causal attention)
-    source_points_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1).to(source_points.device)
-
-    # Create key padding mask for source points
-    source_key_padding_mask = torch.zeros((batch_size, max_length), dtype=torch.bool, device=source_points.device)
-    for i, length in enumerate(n_points):
-        source_key_padding_mask[i, length:] = True  # Mark padding positions with True
-
-    return source_points_mask, source_key_padding_mask
-
 def cosine_norm(x: torch.Tensor, dim=-1) -> torch.Tensor:
     """
     Places vectors onto the unit-hypersphere
@@ -101,32 +42,6 @@ def cosine_norm(x: torch.Tensor, dim=-1) -> torch.Tensor:
     norm = torch.norm(x, p=2, dim=dim, keepdim=True).clamp(min=1e-6)
     # divide by the magnitude to place on the unit hypersphere
     return x / norm
-
-class Scale(nn.Module):
-    """
-    A module that manages learnable scaling parameters to ensure different learning rates
-    from the rest of the parameters in the model (see pages 5 and 19)
-    
-    Args:
-        dim (int): Dimension of the scaling parameter
-        scale (float): Initial scale value
-        init (float): Initial value for the scaling parameter
-        device (str, optional): Device to store the parameter on
-    """
-    def __init__(self, dim: int, heads: int = 1, scale: float = 1.0, init: float = 1.0, device=None):
-        super().__init__()
-        self.device = (('cuda' if torch.cuda.is_available() else
-                      'mps' if torch.backends.mps.is_available() else 'cpu')
-                      if device is None else device)
-        self.init = init
-        self.scale = scale
-        self.s = nn.Parameter(torch.ones(heads, dim, device=self.device) * scale)
-            # heads == 1 gives us a single regular vector
-            # heads > 1 gets used in attention mechanism for different scaling vector for each head
-    
-    def forward(self):
-        """Compute the effective scaling factor."""
-        return self.s * (self.init / self.scale) # shape (heads, dim)
 
 class ModelConfig:
     """
@@ -159,13 +74,12 @@ class MNMT(utils.backbone.VGG16_bn):
         nGPT_decoder_config.mlp_hidden_mult = cfg.Matching_TF.nGPT_mlp_hidden_mult
         self.n_gpt_decoder = NGPT_DECODER(nGPT_decoder_config)
         
+        # TO-DO: weight sharing between decoders
         self.graph_decoders = nn.ModuleList([NGPT_DECODER(nGPT_decoder_config) for _ in range(num_graphs)])
         
         self.w_cosine = PairwiseWeightedCosineSimilarity(cfg.Matching_TF.d_model)
         
-        self.attention_maps = [] # for visualization
-        self.masks_viz_counter = 0
-        
+        self.similarity_matrices = [] # pairewise cosine similarity storage
     
     def normalize_linear(self, module):
         """
@@ -186,21 +100,9 @@ class MNMT(utils.backbone.VGG16_bn):
         """
         Enforces constraints after each optimization step:
         2. Cosine normalization on Linear layer weights where one dimension matches model dim
-        """
-        # for layer in self.n_gpt_encoder.layers:
-        #     layer.alpha_A.s.data.abs_()
-        #     layer.alpha_M.s.data.abs_()
-            
+        """ 
         for decoder in self.graph_decoders:
-            for layer in decoder.layers:
-                layer.alpha_A.s.data.abs_()
-                layer.alpha_C.s.data.abs_()
-                layer.alpha_G.s.data.abs_()
-                layer.alpha_M.s.data.abs_()
-        # Cosine normalize relevant Linear layers
-        for module in self.modules():
-            if isinstance(module, (nn.Linear, nn.Embedding)):
-                self.normalize_linear(module)
+            decoder.enforce_constraints()
     
     
     
@@ -211,16 +113,24 @@ class MNMT(utils.backbone.VGG16_bn):
         return source_nodes
     
 
-    def forward(
-        self,
-        images,
-        points,
-        graphs,
-        n_points,
-        n_points_sample, 
-        perm_mats,
-        in_training=True,
-    ):
+    def forward(self, images, points, graphs, n_points, n_points_sample, perm_mats, in_training=True):
+        """
+        Forward pass for multiple graphs through Swin encoder and respective decoders.
+
+        Args:
+            images: List[[B, 3, H, W]]
+            points: Keypoints per graph
+            graphs: List of Graph objects
+            n_points: List[int]
+            n_points_sample: List[int]
+            perm_mats: [n x n] list of [B, K, K] permutation matrices
+
+        Returns:
+            decoded_graphs: List[[B, K, D]]
+            attention_maps: List[Dict]
+            similarity_matrices: List[List[[B, K, K]]]
+        """
+         
         batch_size = graphs[0].num_graphs
         orig_graph_list = []
         encoded_graphs, masks = [], []
@@ -257,7 +167,6 @@ class MNMT(utils.backbone.VGG16_bn):
                 
             global_feature = self.final_layers(edges)[0].reshape((nodes.shape[0], -1))
             global_feature = self.glob_to_node_dim(global_feature)
-            global_feature = global_feature + self.cls_enc
             global_feature = global_feature.unsqueeze(1).expand(-1,1, -1)
             
             # global_feature = self.linear_cls(global_feature)
@@ -267,136 +176,60 @@ class MNMT(utils.backbone.VGG16_bn):
             global_feature_mask = torch.tensor([True]).unsqueeze(0).expand(h_res.size(0), -1).to(global_feature.device)
             mask = torch.cat([global_feature_mask, mask], dim=1)
             
+            # apply mask to global token if active and padding of keypoints
+            for b in range(h_res.size(0)):
+                cutoff = int(n_points_sample[b])
+                if cfg.Matching_TF.global_feat:
+                    mask[b, cutoff + 1:] = False
+                    h_res[b, cutoff + 1:, :] = 0
+                else:
+                    mask[b, cutoff:] = False
+                    h_res[b, cutoff:, :] = 0
+            
             encoded_graphs.append(h_res)
             masks.append(mask)
 
             orig_graph_list.append((h_res,mask))
 
         decoded_graphs = []
-        self.attention_maps.clear()
 
         for i in range(self.num_graphs):
             decoder = self.graph_decoders[i]
-            memory = torch.cat([encoded_graphs[j] for j in range(self.num_graphs) if j != i], dim=0)
-            memory_mask = torch.cat([masks[j] for j in range(self.num_graphs) if j != i], dim=0)
+                
+            memory = torch.cat([encoded_graphs[j] for j in range(self.num_graphs) if j != i], dim=1) # all graphs not i [B, (G-1) * L, D]
+            memory_mask = torch.cat([masks[j] for j in range(self.num_graphs) if j != i], dim=1)    # all masks not i:  unsqueeze each to [B, G-1, L]
 
-            target = encoded_graphs[i]
-            target_mask = masks[i]
-            tgt_len = target.size(1)
-
-            # Autoregressive causal mask
-            if in_training:
-                causal_mask = torch.triu(torch.ones((tgt_len, tgt_len), device=target.device), diagonal=1).bool()
-                self.visualize_mask(causal_mask.cpu(), f"causal_mask_graph_{i}_step_{self.mask_viz_counter}.png")
-                self.visualize_mask(target_mask[0].cpu().unsqueeze(0), f"target_padding_mask_graph_{i}_step_{self.mask_viz_counter}.png")
-                self.visualize_mask(memory_mask[0].cpu().unsqueeze(0), f"memory_padding_mask_graph_{i}_step_{self.mask_viz_counter}.png")
-            else:
-                causal_mask = None
-
-            dec_out, self_attn_weights, cross_attn_weights = decoder(
-                tgt=target,
-                memory=memory,
-                memory_key_padding_mask=memory_mask,
-                tgt_key_padding_mask=target_mask,
-                tgt_mask=causal_mask,
-                return_attention=True
+            target = encoded_graphs[i]  # current graph encoded feature
+            
+            #print("DECODER called with")
+            #print("---------------------------------------------")
+            #print(f"source graph encoding: {target.shape}")
+            #print(f"mask: None")
+            #print(f"padding mask: {memory_mask.shape}")
+            #print(f"encoder_output: {memory.shape}")
+            #print("---------------------------------------------")
+            
+            # no autoregressive mask
+            dec_out = decoder(
+                source_nodes=target,
+                mask=None,
+                padding_mask=memory_mask,
+                encoder_output=memory,
+                is_eval=not in_training
             )
-            decoded_graphs.append(dec_out[:, 1:, :])
-
-            self.attention_maps.append({
-                'graph_idx': i,
-                'self_attention': self_attn_weights,
-                'cross_attention': cross_attn_weights
-            })
-
-        self.mask_viz_counter += 1
-        return decoded_graphs, self.attention_maps
-
-    def visualize_mask(self, mask_tensor, filename):
-            plt.figure(figsize=(5, 5))
-            plt.imshow(mask_tensor.numpy(), cmap='gray', interpolation='nearest')
-            plt.title(filename)
-            plt.colorbar()
-            plt.tight_layout()
-            plt.savefig(f"attention_masks/{filename}")
-            plt.close()
+            dec_out = dec_out[:, 1:, :] # [B, K, D]
+            decoded_graphs.append(dec_out)
         
-class MLP_prototype(nn.Module):
-    def __init__(self, model_dim):
-        super(MLP_prototype, self).__init__()
-        self.layer1 = nn.Linear(model_dim * 2, model_dim)
+        # Store pairwise cosine similarity for future visualization
+        self.similarity_matrices = [] # reset List
+        for i in range(self.num_graphs):
+            row = []
+            for j in range(self.num_graphs):
+                sim = self.w_cosine(decoded_graphs[i], decoded_graphs[j])
+                row.append(sim.detach().cpu())
+            self.similarity_matrices.append(row)
 
-    def forward(self, x, dropout=None):
-        # Feedforward
-        x = self.layer1(x)
-        if dropout is not None:
-            x = torch.nn.functional.dropout(x, p=dropout)
-        
-        # if self.l2_scaling:
-        #     # Apply L2 normalization to the final layer output
-        #     output = F.normalize(output, p=2, dim=-1)
-        return x
-
-
-class MLP(nn.Module):
-    def __init__(self, h_sizes, out_size, l2_scaling):
-        super(MLP, self).__init__()
-        self.hidden = nn.ModuleList()
-        self.l2_scaling = l2_scaling
-        for k in range(len(h_sizes) - 1):
-            self.hidden.append(nn.Linear(h_sizes[k], h_sizes[k + 1]))
-        self.out = nn.Linear(h_sizes[-1], out_size)
-
-    def forward(self, x):
-        # Feedforward
-        for layer in self.hidden:
-            x = layer(x)
-            x = F.relu(x)
-        output = self.out(x)
-        # if self.l2_scaling:
-        #     # Apply L2 normalization to the final layer output
-        #     output = F.normalize(output, p=2, dim=-1)
-        return output 
-
-class MLP(nn.Module):
-    def __init__(self, h_sizes, out_size, l2_scaling):
-        super(MLP, self).__init__()
-        self.hidden = nn.ModuleList()
-        self.l2_scaling = l2_scaling
-        for k in range(len(h_sizes) - 1):
-            self.hidden.append(nn.Linear(h_sizes[k], h_sizes[k + 1]))
-        self.out = nn.Linear(h_sizes[-1], out_size)
-
-    def forward(self, x):
-        # Feedforward
-        for layer in self.hidden:
-            x = layer(x)
-            x = F.relu(x)
-        output = self.out(x)
-        # if self.l2_scaling:
-        #     # Apply L2 normalization to the final layer output
-        #     output = F.normalize(output, p=2, dim=-1)
-        return output
-
-class MLPQuery(nn.Module):
-    def __init__(self, node_dim, hidden_size, hidden_out, batch_norm):
-        super(MLPQuery, self).__init__()
-        self.lin1 = nn.Linear(2 * node_dim, hidden_size)
-        self.batch_norm = batch_norm
-        if batch_norm:
-            self.bn = nn.BatchNorm1d(hidden_size)
-        self.lin2 = nn.Linear(hidden_size, hidden_out)
-
-    def forward(self, x):
-            x = self.lin1(x)
-            if self.batch_norm:
-                x = self.bn(torch.transpose(x, 1, 2))
-                x = torch.transpose(x, 1, 2)
-            x = nn.functional.relu(x)
-            out = self.lin2(x)
-            return out
-
-
+        return decoded_graphs, self.similarity_matrices
 
 class PairwiseWeightedCosineSimilarity(nn.Module):
     def __init__(self, node_feature_dim):

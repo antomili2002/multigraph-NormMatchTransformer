@@ -183,15 +183,12 @@ class SelfAttention(nn.Module):
         
         # Compute attention logits (compare queries & keys)
         logits = (q @ k.transpose(-2, -1)) * self.scale # (batch_size, num_heads, seq_len, seq_len)
-        logits = logits.to(mask.device)
-        # here we mask out all the future-values
-        if is_eval == True:
-            mask = mask.unsqueeze(1)
-            
-        logits = logits.masked_fill(mask, -1e9)
         
-        
-        
+        if mask is not None:
+            # mask [B, Lk] -> [B, 1, 1, Lk]
+            mask = mask.unsqueeze(1).unsqueeze(2)
+            logits = logits.to(mask.device)
+            logits = logits.masked_fill(mask, -1e9)
 
         # Compute attention scores (grab the relevant values that correspond to the attention logits)
         scores =  F.softmax(logits, dim=-1) @ v # (batch_size, n_heads, seq_len, head_dim)
@@ -290,15 +287,21 @@ class CrossAttention(nn.Module):
             torch.Tensor: Output tensor of shape (batch_size, seq_len, dim).
         """
         batch_size, seq_len, _ = x.shape
+        _, seq_len_kv, _ = memory.shape
         
         # Linear projections for queries, keys, and values
-        q, k, v = self.Wq(x), self.Wk(memory), self.Wv(memory)
-            # shape: (batch_size, seq_len, dim) -> (batch_size, seq_len, num_heads * head_dim)
+        q = self.Wq(x)
+        k = self.Wk(memory)
+        v = self.Wv(memory)
+        # shape: (batch_size, seq_len, dim) -> (batch_size, seq_len, num_heads * head_dim)
 
         # Reshape projections to separate heads
+        #print(f"q.shape: {q.shape}")  # or k, v
+        #print(f"Expected shape: ({batch_size}, {seq_len}, {self.num_heads}, {self.head_dim})")
+        
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        k = k.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        v = v.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        k = k.view(batch_size, seq_len_kv, self.num_heads, self.head_dim)
+        v = v.view(batch_size, seq_len_kv, self.num_heads, self.head_dim)
 
         # applying RoPE
         # sin = freqs['sin'][:, :seq_len, :, :].to(self.device) 
@@ -319,8 +322,8 @@ class CrossAttention(nn.Module):
         # Compute attention logits (compare queries & keys)
         logits = (q @ k.transpose(-2, -1)) * self.scale # (batch_size, num_heads, seq_len, seq_len)
         
-        
-        padding_mask = padding_mask.unsqueeze(1)
+        padding_mask = ~padding_mask
+        padding_mask = padding_mask.unsqueeze(1).unsqueeze(2) # [B, 1, 1, seq_len_kv]
         
         
         # here we mask out all the future-values
@@ -453,7 +456,12 @@ class Layer(nn.Module):
         # print(h.shape, h)
         # print("--------------------------------")
         
-        #EDIT
+        #print("Cross attention called with")
+        #print("---------------------------------------------")
+        #print(f"h : {h.shape}")
+        #print(f"m: {m.shape}")
+        #print(f"padding mask: {padding_mask.shape}")
+        #print("---------------------------------------------")
         h_C = cosine_norm(self.cross_attn(h, m, padding_mask))#freqs, 
         h = cosine_norm(h + self.alpha_C() * (h_C - h))
         
@@ -606,6 +614,13 @@ class NGPT_DECODER(nn.Module):
         x = source_nodes
         # run through the model's layers
         for layer in self.layers:
+            #print("Layer called with")
+            #print("---------------------------------------------")
+            #print(f"source nodes: {source_nodes.shape}")
+            #print(f"mask: {mask.shape}")
+            #print(f"padding mask: {padding_mask.shape}")
+            #print(f"encoder_output: {encoder_output.shape}")
+            #print("---------------------------------------------")
             x = layer(x, encoder_output, mask, padding_mask, freqs, is_eval)
         
         # the final output of the model
@@ -614,15 +629,3 @@ class NGPT_DECODER(nn.Module):
         
         return logits
         # to un-limit the temperature of the final probability distribution (see page 2)
-        
-        #EDIT
-        # scaled_logits = logits * self.s_z()
-        
-        # loss = None
-        # if target_token_ids is not None: # if we're training, calculate the loss
-        #     loss = self.criterion(
-        #         scaled_logits.view(batch_size * seq_len, self.vocab_len),
-        #         target_token_ids.reshape(batch_size * seq_len)
-        #     )
-
-        # return logits, loss

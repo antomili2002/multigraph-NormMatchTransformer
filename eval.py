@@ -5,10 +5,36 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist  # Add this import
 from scipy.optimize import linear_sum_assignment
+from itertools import combinations
 
 from utils.config import cfg
-from utils.evaluation_metric import calculate_correct_and_valid, calculate_f1_score, get_pos_neg
+from utils.evaluation_metric import calculate_correct_and_valid, calculate_f1_score
 
+
+def reshape_perm_matrices(perm_mat_list: list, data_list: list):
+    """
+    Reshapes Ground Truth Matrices List from a List of Tensors of shape (B, K, K)
+    to List[List[torch.Tensor]] with shape (B, K, K) for indexing using perm_mats[i][j]
+
+    Args:
+        perm_mat_list (list): Ground Truth Matrices List of shape List[Tensor] (B, K, K)
+        data_list (list): List of data input
+
+    Returns:
+        torch.Tensor: List of List of toch.Tensor with shape (B, K, K)
+    """
+    G = len(data_list)  # number of graphs
+    perm_mats = [[None for _ in range(G)] for _ in range(G)]
+
+    idx = 0
+    for i in range(G):
+        for j in range(i + 1, G):  # upper triangle
+            P_ij = perm_mat_list[idx]
+            perm_mats[i][j] = P_ij
+            perm_mats[j][i] = P_ij.transpose(-1, -2)
+            idx += 1
+        perm_mats[i][i] = torch.eye(P_ij.size(-1), device=P_ij.device).expand(P_ij.size(0), -1, -1)
+    return perm_mats
 
 def sinkhorn_logspace(
     similarity: torch.Tensor,
@@ -62,7 +88,7 @@ def sinkhorn_cosine(
     #    (you can also add a temperature scale if needed).
     # cosine_sim[cosine_sim <= 0] = eps
     # input_tensor = cosine_sim
-    Q = torch.exp(input_tensor)
+    Q = torch.exp(cosine_sim)
 
     for _ in range(max_iter):
         # 2) Row normalization
@@ -89,6 +115,97 @@ def cosine_norm(x, dim=-1):
         norm = torch.norm(x, p=2, dim=dim, keepdim=True).clamp(min=1e-6)
         # divide by the magnitude to place on the unit hypersphere
         return x / norm
+    
+def permutation_synchronization(pairwise_perm_matrices, num_graphs, keypoint_sizes):
+    """
+    Synchroizes pairewise permutation matrices into absolute permutation using spectral methods
+
+    Args:
+        pairwise_perm_matrices: Dict[(i, j)] -> P_ij where P_ij is [ni, nj] (torch.Tensor)
+        num_graphs: int, number of graphs (G)
+        keypoint_sizes: List[int], number of keypoints per graph [n1, n2, ..., nG]
+
+    Returns:
+        List of tensors [P_0, ..., P_G-1], where each P_i is [ni, n0]
+        These represent permutations from graph i to the reference graph 0.
+    """
+    total_kpts = sum(keypoint_sizes)  # total keypoints across all graphs
+    device = next(iter(pairwise_perm_matrices.values())).device  # get correct device
+
+    # Initialize full block matrix [N, N] with N = total number of keypoints
+    block_matrix = torch.zeros((total_kpts, total_kpts), device=device)
+
+    # Build mapping of (i, j) to proper slice indices
+    offsets = [0]
+    for size in keypoint_sizes:
+        offsets.append(offsets[-1] + size)  # offsets[i] is the start index of graph i
+
+    for (i, j), P_ij in pairwise_perm_matrices.items():
+        ni, nj = keypoint_sizes[i], keypoint_sizes[j]
+        i_start, i_end = offsets[i], offsets[i + 1]
+        j_start, j_end = offsets[j], offsets[j + 1]
+
+        # Insert P_ij and its transpose
+        block_matrix[i_start:i_end, j_start:j_end] = P_ij
+        block_matrix[j_start:j_end, i_start:i_end] = P_ij.T
+
+    # Spectral decomposition: get top-n0 eigenvectors (corresponds to reference graph 0)
+    _, eigvecs = torch.linalg.eigh(block_matrix)  # [N, N]
+    n0 = keypoint_sizes[0]
+    embeddings = eigvecs[:, -n0:]  # Take last n0 components
+
+    # Split into individual graph embeddings: List[G] of [ni, n0]
+    node_embeddings = []
+    for i in range(num_graphs):
+        start, end = offsets[i], offsets[i + 1]
+        node_embeddings.append(embeddings[start:end])  # [ni, n0]
+
+    # Align each embedding to base embedding (graph 0)
+    base = node_embeddings[0]  # [n0, n0]
+    perms = []
+    for emb in node_embeddings:
+        sim = -emb @ base.T  # [ni, n0]
+        row, col = linear_sum_assignment(sim.cpu().numpy())
+        P = torch.zeros_like(sim)
+        P[row, col] = 1
+        perms.append(P)  # each P is [ni, n0]
+
+    return perms  # List[G] of [ni, n0]
+
+def multi_graph_inference(similarity_matrices, epsilon=0.035, max_iter=27):
+    B = similarity_matrices[0][0].shape[0]
+    G = len(similarity_matrices)
+    n = similarity_matrices[0][0].shape[1]
+    all_abs_perms = []
+    
+    for b in range(B):
+        pairwise_perm_matrices = {}
+        keypoint_sizes = []
+        
+        # Determine number of keypoints per graph for sample b
+        for i in range(G):
+            n_i = similarity_matrices[i][i].shape[1]
+            keypoint_sizes.append(n_i)
+
+        for i, j in combinations(range(G), 2):
+            sim = similarity_matrices[i][j][b]  # [ni, nj]
+            P_ij = sinkhorn_logspace(sim[None], epsilon, max_iter)[0]  # [ni, nj]
+            pairwise_perm_matrices[(i, j)] = P_ij
+            pairwise_perm_matrices[(j, i)] = P_ij.T
+
+        abs_perms = permutation_synchronization(pairwise_perm_matrices, G, keypoint_sizes)  # List[G] of [ni, n0]
+
+        # Pad to square shape [max_n, max_n] for stacking
+        max_n = max(keypoint_sizes)
+        padded = []
+        for P in abs_perms:
+            P_padded = torch.zeros((max_n, max_n), device=P.device)
+            P_padded[:P.shape[0], :P.shape[1]] = P
+            padded.append(P_padded)
+        all_abs_perms.append(torch.stack(padded, dim=0))  # [G, max_n, max_n]
+        
+    return torch.stack(all_abs_perms, dim=0)  # [B, G, n, n]
+    
 def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verbose=True):
     print("Start evaluation...")
     since = time.time()
@@ -121,135 +238,77 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
 
         running_since = time.time()
         iter_num = 0
-
-        
         ds.set_cls(cls)
-        acc_match_num = torch.zeros(1, device=device)
-        acc_total_num = torch.zeros(1, device=device)
-        # tp = torch.zeros(1, device=device)
-        # fp = torch.zeros(1, device=device)
-        # fn = torch.zeros(1, device=device)
 
         # for analysis of each step accuracy
-        
         result_dict = {}
-        tp = 0
-        fp = 0
-        fn = 0
-        epoch_f1 = 0.0
-        epoch_correct = 0
-        epoch_total_valid = 0
+        tp, fp, fn = 0, 0, 0
+        epoch_f1, epoch_correct, epoch_total_valid = 0, 0, 0
         for k, inputs in enumerate(dataloader):
             data_list = [_.cuda() for _ in inputs["images"]]
-
             points_gt = [_.cuda() for _ in inputs["Ps"]]
             n_points_gt = [_.cuda() for _ in inputs["ns"]]
             edges = [_.to("cuda") for _ in inputs["edges"]]
             perm_mat_list = [perm_mat.cuda() for perm_mat in inputs["gt_perm_mat"]]
 
+            # reshape gt_perm_mat
+            perm_mat_list = reshape_perm_matrices(perm_mat_list, data_list)
+            
+            n_points_gt_sample = n_points_gt[0]
             batch_num = data_list[0].size(0)
-            num_nodes_s = points_gt[0].size(1)
-            num_nodes_t = points_gt[1].size(1)
-
             iter_num = iter_num + 1
 
-            visualize = k == 0 and cfg.visualize
-            visualization_params = {**cfg.visualization_params, **dict(string_info=cls, true_matchings=perm_mat_list)}
+            with torch.no_grad():
+                
+                decoded_graphs, similarity_matrices = model(
+                    data_list, points_gt, edges, n_points_gt, n_points_gt_sample, perm_mat_list, in_training=False
+                )
 
-            matched_instances_at_step = []
-            with torch.set_grad_enabled(False):
-                
-                matchings = []
-                B, N_s, N_t = perm_mat_list[0].size()
-                n_points_sample = n_points_gt[0]
-                
-                eval_pred_points = 0
-                j_pred = 0
-                predictions_list = []
-                # keypoint_order = []
-                for _ in range(B):
-                    predictions_list.append([])
-                    
-                
-                
-                    
-                similarity_scores, _, _, _, _ = model(data_list, points_gt, edges, n_points_gt, n_points_sample, perm_mat_list, eval_pred_points, in_training= False)
-                
-                batch_size = similarity_scores.shape[0]
-                
-                sinkhorn = sinkhorn_logspace(similarity_scores)
-                
-                sinkhorn_max = torch.argmax(sinkhorn, dim=-1)
-                for np in range(N_t):
-                    for b in range(batch_size):
-                        if eval_pred_points < n_points_gt[0][b]:
-                            predictions_list[b].append(sinkhorn_max[b, eval_pred_points].item())
-                        else:
-                            predictions_list[b].append(-1)
-                    eval_pred_points +=1
+                pred_perm = multi_graph_inference(similarity_matrices)
+
+                for b in range(pred_perm.size(0)):
+                    for gi in range(len(perm_mat_list)):
+                        pred = torch.argmax(pred_perm[b, gi], dim=-1)
+                        target = torch.argmax(perm_mat_list[gi][0][b], dim=-1)
+
+                        #print(f"pred shape: {pred.shape}")
+                        #print(f"target shape: {target.shape}")
+                        
+                        K = min(pred.shape[0], target.shape[0])
+                        prediction_tensor = pred[:K].to(target.device)
+                        y_values_matching = target[:K]
+                        
+                        #print("pred device:", pred.device)
+                        #print("target device:", target.device)
+
+                        
+                        correct, valid = calculate_correct_and_valid(prediction_tensor, y_values_matching)
+                        _tp, _fp, _fn = calculate_f1_score(prediction_tensor, y_values_matching)
+
+                        epoch_correct += correct
+                        epoch_total_valid += valid
+                        tp += _tp
+                        fp += _fp
+                        fn += _fn
                 
                 
-                
-                prediction_tensor = torch.tensor(predictions_list).to(perm_mat_list[0].device)
-                y_values_matching = torch.argmax(perm_mat_list[0], dim=-1)
-                batch_correct, batch_total_valid = calculate_correct_and_valid(prediction_tensor, y_values_matching)
-                
-                
-                
-                error_list = (prediction_tensor != y_values_matching).int()
+                #error_list = (prediction_tensor != y_values_matching).int()
             
-                for idx, e in enumerate(n_points_gt[0]):
-                    if e.item() not in result_dict:
-                        result_dict[e.item()] = [1, error_list[idx,:e.item()]]
-                    result_dict[e.item()][0] += 1
-                    result_dict[e.item()][1] += error_list[idx,:e.item()]
-                # Iterate through the batch
-                _tp, _fp, _fn = calculate_f1_score(prediction_tensor, y_values_matching)
-
-                
-                epoch_correct += batch_correct
-                epoch_total_valid += batch_total_valid
-                tp += _tp
-                fp += _fp
-                fn += _fn
-            
-            bs = perm_mat_list[0].size(0)
-            
-            # evaluation metrics
-            # _, _acc_match_num, _acc_total_num = matching_accuracy_from_lists(s_pred_mat_list, perm_mat_gt_list)
-            # _tp, _fp, _fn = get_pos_neg_from_lists(s_pred_mat_list, perm_mat_gt_list)
-
-            # acc_match_num += _acc_match_num
-            # acc_total_num += _acc_total_num
-            # tp += _tp
-            # fp += _fp
-            # fn += _fn
-
             if iter_num % 40 == 0 and verbose: #cfg.STATISTIC_STEP
                 running_speed = 40 * batch_num / (time.time() - running_since) #cfg.STATISTIC_STEP
                 print("Class {:<8} Iteration {:<4} {:>4.2f}sample/s".format(cls, iter_num, running_speed))
                 running_since = time.time()
         
-        
-        dataset_size = len(dataloader.dataset)
-        
-        if epoch_total_valid > 0:
-            epoch_acc = epoch_correct / epoch_total_valid
-        else:
-            epoch_acc = 0.0
+        acc = epoch_correct / epoch_total_valid if epoch_total_valid else 0
+        precision = tp / (tp + fp + 1e-8)
+        recall = tp / (tp + fn + 1e-8)
+        f1 = 2 * precision * recall / (precision + recall + 1e-8)
 
-        precision_global = tp / (tp + fp + 1e-8)
-        recall_global = tp / (tp + fn + 1e-8)
-        
-        # Global F1 score
-        epoch_f1 = 2 * (precision_global * recall_global) / (precision_global + recall_global + 1e-8)
-        
-        accs[i] = epoch_acc
-        f1_scores[i] = epoch_f1
+        accs[i] = acc
+        f1_scores[i] = f1
+
         if verbose:
-            print("Class {} acc = {:.4f} F1 = {:.4f}".format(cls, accs[i], f1_scores[i]))
-            
-        error_dist_dict[cls] = result_dict
+            print("Class {} Acc = {:.4f}, F1 = {:.4f}".format(cls, acc, f1))
         
     # print(error_dist_dict)
     time_elapsed = time.time() - since
@@ -262,29 +321,5 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
     for cls, single_acc, f1_sc in zip(classes, accs, f1_scores):
         print("{} = {:.4f}, {:.4f}".format(cls, single_acc, f1_sc))
     print("average = {:.4f}, {:.4f}".format(torch.mean(accs), torch.mean(f1_scores)))
-
-    # error distribution
-    # err_dist={}
-    # num_bins = 5
-    # for cls, v in error_dist_dict.items():
-    #     matched_instances_size = max([tensor.size(0) for tensor in v ])
-    #     n_matched_instances = torch.zeros(matched_instances_size)
-
-    #     n_possible_matches  = [torch.ones(tensor.size(0)) for tensor in v]
-    #     total_instances_to_match = torch.zeros(matched_instances_size)
-    #     for tensor in v:
-    #         n_matched_instances[:tensor.size(0)] += tensor
-    #     for tensor in n_possible_matches:
-    #         total_instances_to_match[:tensor.size(0)] += tensor
-        
-    #     indices = torch.arange(matched_instances_size)
-    #     bin_edges = torch.linspace(0, matched_instances_size, num_bins)
-    #     binned_indices = torch.bucketize(indices, bin_edges)
-        
-    #     binned_matches = torch.bincount(binned_indices, weights=n_matched_instances)
-    #     binned_counts = torch.bincount(binned_indices, weights=total_instances_to_match)
-        
-    #     cls_error_distribution = binned_matches / binned_counts
-    #     err_dist[cls] = cls_error_distribution
 
     return accs, f1_scores, error_dist_dict
