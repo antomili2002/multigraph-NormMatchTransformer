@@ -1,10 +1,10 @@
 {
-  "BATCH_SIZE": 9,
+  "BATCH_SIZE": 8,
   "DATASET_NAME": "PascalVOC",
   "exclude_willow_classes": false,
   "EVAL": {
     "SAMPLES": 1000,
-    "num_graphs_in_matching_instance": 3
+    "num_graphs_in_matching_instance": 2
   },
   "SPLINE_CNN": {
     "input_features": 1024,
@@ -33,7 +33,7 @@
     "lr_schedule": "long_halving4",
     "clip_norm": 0,
     "weight_decay": 0,
-    "num_graphs_in_matching_instance": 3,
+    "num_graphs_in_matching_instance": 2,
     "random_swap": false,
     "AR": true,
     "temperature": 0.1,
@@ -47,7 +47,7 @@
     "reduced_vis": true
   },
   "evaluate_only": false,
-  "model_dir": "./results/voc_basic/MNMT",
+  "model_dir": "./results/voc_basic/NMT",
   "log_dir": "runs/",
-  "MODEL_ARCH": "MNMT"
+  "MODEL_ARCH": "NMT"
 }

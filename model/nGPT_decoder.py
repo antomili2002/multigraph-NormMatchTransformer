@@ -19,6 +19,26 @@ def cosine_norm(x: torch.Tensor, dim=-1) -> torch.Tensor:
     # divide by the magnitude to place on the unit hypersphere
     return x / norm
 
+class LayerLoss(nn.Module):
+    def __init__(self, init_param=0.3):
+        super(LayerLoss, self).__init__()
+        self.lp = torch.tensor(init_param, dtype=torch.float32)    
+    def forward(self, keypoints: torch.Tensor):
+        keypoints_sim_numer = torch.bmm(keypoints, keypoints.transpose(1, 2))
+        keypoints_sim_normed1 = torch.norm(keypoints, p=2, dim=-1).clamp(min=1e-8).unsqueeze(2)
+        keypoints_sim_normed2 = torch.norm(keypoints, p=2, dim=-1).clamp(min=1e-8).unsqueeze(1)
+        keypoints_sim_denominator = torch.bmm(keypoints_sim_normed1, keypoints_sim_normed2)
+        keypoints_cosine_sim_ = keypoints_sim_numer / keypoints_sim_denominator
+        
+        ident_mat = torch.eye(keypoints_cosine_sim_.shape[1]).to(keypoints.device)
+        keypoints_cosine_sim = keypoints_cosine_sim_ - 2 * ident_mat
+        
+        keypoints_prot_score_max, _ = torch.max(keypoints_cosine_sim, dim=-1)
+        keypoints_prot_score_mean = torch.mean(keypoints_prot_score_max, dim=-1)
+        keypoints_prot_score_mean = torch.mean(keypoints_prot_score_mean)
+        return keypoints_prot_score_mean * self.lp
+        
+
 class Scale(nn.Module):
     """
     A module that manages learnable scaling parameters to ensure different learning rates
@@ -138,8 +158,6 @@ class SelfAttention(nn.Module):
 
     def forward(self,
         x: torch.Tensor,
-        # freqs: dict = None,
-        mask: torch.Tensor = None,
         freqs = None,
         is_eval = False
     ) -> torch.Tensor:
@@ -166,11 +184,11 @@ class SelfAttention(nn.Module):
         v = v.view(batch_size, seq_len, self.num_heads, self.head_dim)
 
         # applying RoPE
-        # sin = freqs['sin'][:, :seq_len, :, :].to(self.device) 
-        # cos = freqs['cos'][:, :seq_len, :, :].to(self.device) # (1, seq_len, 1, head_dim // 2)
-        # q = self.apply_rotary_pos_emb(q, sin, cos) # no shape change
-        # k = self.apply_rotary_pos_emb(k, sin, cos)
-
+        #sin = freqs['sin'][:, :seq_len, :, :].to(self.device) 
+        #cos = freqs['cos'][:, :seq_len, :, :].to(self.device) # (1, seq_len, 1, head_dim // 2)
+        #q = self.apply_rotary_pos_emb(q, sin, cos) # no shape change
+        #k = self.apply_rotary_pos_emb(k, sin, cos)
+        
         # normalizing & scaling our queries  & keys (see page 4)
         s_qk = self.s_qk() # (num_heads, head_dim)
         q = cosine_norm(q) * s_qk # then scale each head
@@ -183,13 +201,8 @@ class SelfAttention(nn.Module):
         
         # Compute attention logits (compare queries & keys)
         logits = (q @ k.transpose(-2, -1)) * self.scale # (batch_size, num_heads, seq_len, seq_len)
+        logits = logits.to(x.device)
         
-        if mask is not None:
-            # mask [B, Lk] -> [B, 1, 1, Lk]
-            mask = mask.unsqueeze(1).unsqueeze(2)
-            logits = logits.to(mask.device)
-            logits = logits.masked_fill(mask, -1e9)
-
         # Compute attention scores (grab the relevant values that correspond to the attention logits)
         scores =  F.softmax(logits, dim=-1) @ v # (batch_size, n_heads, seq_len, head_dim)
         # Combine heads
@@ -287,21 +300,15 @@ class CrossAttention(nn.Module):
             torch.Tensor: Output tensor of shape (batch_size, seq_len, dim).
         """
         batch_size, seq_len, _ = x.shape
-        _, seq_len_kv, _ = memory.shape
         
         # Linear projections for queries, keys, and values
-        q = self.Wq(x)
-        k = self.Wk(memory)
-        v = self.Wv(memory)
-        # shape: (batch_size, seq_len, dim) -> (batch_size, seq_len, num_heads * head_dim)
+        q, k, v = self.Wq(x), self.Wk(memory), self.Wv(memory)
+            # shape: (batch_size, seq_len, dim) -> (batch_size, seq_len, num_heads * head_dim)
 
         # Reshape projections to separate heads
-        #print(f"q.shape: {q.shape}")  # or k, v
-        #print(f"Expected shape: ({batch_size}, {seq_len}, {self.num_heads}, {self.head_dim})")
-        
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        k = k.view(batch_size, seq_len_kv, self.num_heads, self.head_dim)
-        v = v.view(batch_size, seq_len_kv, self.num_heads, self.head_dim)
+        k = k.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        v = v.view(batch_size, seq_len, self.num_heads, self.head_dim)
 
         # applying RoPE
         # sin = freqs['sin'][:, :seq_len, :, :].to(self.device) 
@@ -322,8 +329,8 @@ class CrossAttention(nn.Module):
         # Compute attention logits (compare queries & keys)
         logits = (q @ k.transpose(-2, -1)) * self.scale # (batch_size, num_heads, seq_len, seq_len)
         
-        padding_mask = ~padding_mask
-        padding_mask = padding_mask.unsqueeze(1).unsqueeze(2) # [B, 1, 1, seq_len_kv]
+        
+        padding_mask = padding_mask.unsqueeze(1)
         
         
         # here we mask out all the future-values
@@ -366,7 +373,7 @@ class MLP(nn.Module):
         self.Wdown = nn.Linear(hidden_dim, output_dim, bias=False, device=self.device)
 
         # this flag designates Wdown to have a different parameter initialization as defined in model.py
-        self.Wdown.GPT_scale_init = 0
+        self.Wdown.GPT_scale_init = 1
 
         # the learnable scaling factors
         self.s_u = Scale(hidden_dim, device=device)
@@ -433,7 +440,9 @@ class Layer(nn.Module):
         # eigen learning rate vector
         self.alpha_M = Scale(cfg.dim, init = 0.05, scale = 1. / math.sqrt(cfg.dim), device=self.device) #init= 0.05
         
-    def forward(self, h: torch.Tensor, m: torch.Tensor, mask: torch.Tensor, padding_mask, freqs, is_eval) -> torch.Tensor: #freqs: dict, 
+        self.layerLoss = LayerLoss(cfg.layer_loss_param)
+        
+    def forward(self, h: torch.Tensor, m: torch.Tensor, padding_mask, freqs, is_eval) -> torch.Tensor: #freqs: dict, 
         """
         Forward pass of the Layer module.
 
@@ -450,18 +459,13 @@ class Layer(nn.Module):
         # print(m.shape, m)
         # print(mask.shape, mask)
         # print("--------------------------------")
-        h_A = cosine_norm(self.attn(h, mask, freqs, is_eval)) #freqs, 
+        h_A = cosine_norm(self.attn(h, freqs, is_eval)) #freqs, 
         h = cosine_norm(h + self.alpha_A() * (h_A - h))
         # print(h_A.shape, h_A)
         # print(h.shape, h)
         # print("--------------------------------")
         
-        #print("Cross attention called with")
-        #print("---------------------------------------------")
-        #print(f"h : {h.shape}")
-        #print(f"m: {m.shape}")
-        #print(f"padding mask: {padding_mask.shape}")
-        #print("---------------------------------------------")
+        #EDIT
         h_C = cosine_norm(self.cross_attn(h, m, padding_mask))#freqs, 
         h = cosine_norm(h + self.alpha_C() * (h_C - h))
         
@@ -474,7 +478,9 @@ class Layer(nn.Module):
         h_M = cosine_norm(self.mlp(h))
         h = cosine_norm(h + self.alpha_M() * (h_M - h))
         
-        return h
+        loss = self.layerLoss(h)
+        
+        return h, loss
 
 class NGPT_DECODER(nn.Module):
     def __init__(self, cfg):
@@ -586,8 +592,7 @@ class NGPT_DECODER(nn.Module):
 
     def forward(
         self, 
-        source_nodes: torch.Tensor, 
-        mask: torch.Tensor,
+        source_nodes: torch.Tensor,
         padding_mask,
         encoder_output: torch.Tensor = None,
         is_eval = False,
@@ -612,20 +617,27 @@ class NGPT_DECODER(nn.Module):
         # initializing the first residual state
         # x = self.token_embedder(source_nodes) # (batch_size, seq_len, dim)
         x = source_nodes
+        loss = torch.zeros(1, requires_grad=True, device=x.device)
         # run through the model's layers
         for layer in self.layers:
-            #print("Layer called with")
-            #print("---------------------------------------------")
-            #print(f"source nodes: {source_nodes.shape}")
-            #print(f"mask: {mask.shape}")
-            #print(f"padding mask: {padding_mask.shape}")
-            #print(f"encoder_output: {encoder_output.shape}")
-            #print("---------------------------------------------")
-            x = layer(x, encoder_output, mask, padding_mask, freqs, is_eval)
+            x, loss_ = layer(x, encoder_output, padding_mask, freqs, is_eval)
+            loss = loss + loss_
         
         # the final output of the model
         logits = x#self.output(x) # (batch_size, seq_len, vocab_len)
         
         
-        return logits
+        return logits, loss
         # to un-limit the temperature of the final probability distribution (see page 2)
+        
+        #EDIT
+        # scaled_logits = logits * self.s_z()
+        
+        # loss = None
+        # if target_token_ids is not None: # if we're training, calculate the loss
+        #     loss = self.criterion(
+        #         scaled_logits.view(batch_size * seq_len, self.vocab_len),
+        #         target_token_ids.reshape(batch_size * seq_len)
+        #     )
+
+        # return logits, loss
