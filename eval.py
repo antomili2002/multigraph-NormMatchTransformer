@@ -9,32 +9,7 @@ from itertools import combinations
 
 from utils.config import cfg
 from utils.evaluation_metric import calculate_correct_and_valid, calculate_f1_score
-
-
-def reshape_perm_matrices(perm_mat_list: list, data_list: list):
-    """
-    Reshapes Ground Truth Matrices List from a List of Tensors of shape (B, K, K)
-    to List[List[torch.Tensor]] with shape (B, K, K) for indexing using perm_mats[i][j]
-
-    Args:
-        perm_mat_list (list): Ground Truth Matrices List of shape List[Tensor] (B, K, K)
-        data_list (list): List of data input
-
-    Returns:
-        torch.Tensor: List of List of toch.Tensor with shape (B, K, K)
-    """
-    G = len(data_list)  # number of graphs
-    perm_mats = [[None for _ in range(G)] for _ in range(G)]
-
-    idx = 0
-    for i in range(G):
-        for j in range(i + 1, G):  # upper triangle
-            P_ij = perm_mat_list[idx]
-            perm_mats[i][j] = P_ij
-            perm_mats[j][i] = P_ij.transpose(-1, -2)
-            idx += 1
-        perm_mats[i][i] = torch.eye(P_ij.size(-1), device=P_ij.device).expand(P_ij.size(0), -1, -1)
-    return perm_mats
+from scipy.linalg import eigh
 
 def sinkhorn_logspace(
     similarity: torch.Tensor,
@@ -66,56 +41,75 @@ def sinkhorn_logspace(
     Q = torch.exp(log_Q)
     return Q
 
-def sinkhorn_cosine(
-    cosine_sim: torch.Tensor,
-    max_iter: int = 15,
-    eps: float = 1e-9
-) -> torch.Tensor:
+def permutation_synchronization(pred_perm_mats, pairs):
     """
-    Converts a batch of cosine similarity matrices into doubly-stochastic matrices 
-    using the Sinkhorn algorithm.
-
-    Args:
-        cosine_sim: Tensor of shape (batch_size, n, m).
-        max_iter:   Number of Sinkhorn iterations.
-        eps:        Small numerical stabilizer to avoid division by zero.
-
-    Returns:
-        Doubly-stochastic matrices of shape (batch_size, n, m).
+    pred_perm_mats: List[L] von Tensoren (B x Ni x Nj)
+    pairs:         List[L] von Tupeln (i,j) für K Graphen
+    return:        List[B] von Dict[(i,j) -> P_syn (Ni x Nj)]
     """
+    B = pred_perm_mats[0].size(0)
+    # for each graph get K and Ni 
+    nodes = set()
+    for i,j in pairs:
+        nodes.add(i); nodes.add(j)
+    K = max(nodes) + 1
 
-    # 1) Exponentiate to ensure entries are positive
-    #    (you can also add a temperature scale if needed).
-    # cosine_sim[cosine_sim <= 0] = eps
-    # input_tensor = cosine_sim
-    Q = torch.exp(cosine_sim)
+    N = [None]*K
+    for idx, (i,j) in enumerate(pairs):
+        _, Ni, Nj = pred_perm_mats[idx].shape
+        if N[i] is None: N[i] = Ni
+        if N[j] is None: N[j] = Nj
 
-    for _ in range(max_iter):
-        # 2) Row normalization
-        row_sums = Q.sum(dim=2, keepdim=True) + eps
-        Q = Q / row_sums
+    offsets = [0]*K
+    for i in range(1, K):
+        offsets[i] = offsets[i-1] + N[i-1]
+    Ntot = sum(N)
 
-        # 3) Column normalization
-        col_sums = Q.sum(dim=1, keepdim=True) + eps
-        Q = Q / col_sums
-        
-    return Q
+    synced_batches = [dict() for _ in range(B)]
 
-def cosine_norm(x, dim=-1):
-        """
-        Places vectors onto the unit-hypersphere
+    for b in range(B):
+        H = torch.zeros(Ntot, Ntot, device=pred_perm_mats[0].device)
+        # diag
+        for i in range(K):
+            o = offsets[i]
+            H[o:o+N[i], o:o+N[i]] = torch.eye(N[i], device=H.device)
+        # Off-diag
+        for idx, (i,j) in enumerate(pairs):
+            oi, oj = offsets[i], offsets[j]
+            Pij = pred_perm_mats[idx][b]
+            H[oi:oi+N[i], oj:oj+N[j]] = Pij
+            H[oj:oj+N[j], oi:oi+N[i]] = Pij.t()
 
-        Args:
-            x (torch.Tensor): Input tensor.
+        # spectral decomposition 
+        H_sym = (H + H.transpose(0, 1)) / 2
+        d = max(N)
+        # take biggest d eigenvectors
+        try:
+            e_vals, e_vecs = torch.linalg.eigh(H_sym)
+            U = e_vecs[:, -d:]    # Ntot x d
+        except RuntimeError:
+            # Fallback auf CPU + NumPy
+            H_cpu = H_sym.cpu().numpy()
+            H_cpu = (H_cpu + H_cpu.T) / 2
+            vals, vecs = np.linalg.eigh(H_cpu)
+            U = torch.from_numpy(vecs[:, -d:]).to(H_sym.device)
 
-        Returns:
-            torch.Tensor: Normalized tensor.
-        """
-        # calculate the magnitude of the vectors
-        norm = torch.norm(x, p=2, dim=dim, keepdim=True).clamp(min=1e-6)
-        # divide by the magnitude to place on the unit hypersphere
-        return x / norm
-    
+        # 3) Für jedes Paar (i,j) Hungarian
+        for (i,j) in pairs:
+            oi, oj = offsets[i], offsets[j]
+            Ui = U[oi:oi+N[i], :]   # Ni x d
+            Uj = U[oj:oj+N[j], :]   # Nj x d
+            S = (Ui @ Uj.t()).cpu().numpy()  # Ni x Nj
+
+            # Hungarian max: cost = -S
+            row_ind, col_ind = linear_sum_assignment(-S)
+            P_syn = torch.zeros(N[i], N[j], device=H.device)
+            P_syn[row_ind, col_ind] = 1.0
+            synced_batches[b][(i,j)] = P_syn
+
+    return synced_batches
+
+
 def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verbose=True):
     print("Start evaluation...")
     since = time.time()
@@ -132,19 +126,21 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
     model.eval()
 
     ds = dataloader.dataset
-    ds.set_num_graphs(cfg.EVAL.num_graphs_in_matching_instance)
+    K = cfg.EVAL.num_graphs_in_matching_instance
+    ds.set_num_graphs(K)
     classes = ds.classes
     cls_cache = ds.cls
 
     accs = torch.zeros(len(classes), device=device)
-    f1_scores = torch.zeros(len(classes), device=device)
+    #f1_scores = torch.zeros(len(classes), device=device)
     error_dist_dict = {}
     
-
-    for i, cls in enumerate(classes):
+    pairs = list(combinations(range(K), 2))
+    
+    for cls_inx, cls in enumerate(classes):
         if local_rank == output_rank:
             if verbose:
-                print("Evaluating class {}: {}/{}".format(cls, i, len(classes)))
+                print("Evaluating class {}: {}/{}".format(cls, cls_inx, len(classes)))
 
         running_since = time.time()
         iter_num = 0
@@ -157,9 +153,9 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
         epoch_f1 = 0.0
         epoch_correct = 0
         epoch_total_valid = 0
-        for k, inputs in enumerate(dataloader):
+        for k, inputs in enumerate(dataloader, 1):
+            iter_num = iter_num + 1
             data_list = [_.cuda() for _ in inputs["images"]]
-
             points_gt = [_.cuda() for _ in inputs["Ps"]]
             n_points_gt = [_.cuda() for _ in inputs["ns"]]
             edges = [_.to("cuda") for _ in inputs["edges"]]
@@ -168,57 +164,81 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
             batch_num = data_list[0].size(0)
             #num_nodes_s = points_gt[0].size(1)
             #num_nodes_t = points_gt[1].size(1)
-
-            iter_num = iter_num + 1
-
-            with torch.set_grad_enabled(False):
-                B, N_s, N_t = perm_mat_list[0].size()
-                n_points_sample = n_points_gt[0]
-                
-                eval_pred_points = 0
-                predictions_list = []
-                # keypoint_order = []
-                for _ in range(B):
-                    predictions_list.append([])
-                    
-                     
-                similarity_scores, _, _, _ = model(data_list, points_gt, edges, n_points_gt, n_points_sample, perm_mat_list, eval_pred_points, in_training= False)
-                
-                batch_size = similarity_scores.shape[0]
-                
-                sinkhorn = sinkhorn_logspace(similarity_scores)
-                
-                sinkhorn_max = torch.argmax(sinkhorn, dim=-1)
-                for np in range(N_t):
-                    for b in range(batch_size):
-                        if eval_pred_points < n_points_gt[0][b]:
-                            predictions_list[b].append(sinkhorn_max[b, eval_pred_points].item())
-                        else:
-                            predictions_list[b].append(-1)
-                    eval_pred_points +=1
-                
-                
-                prediction_tensor = torch.tensor(predictions_list).to(perm_mat_list[0].device)
-                y_values_matching = torch.argmax(perm_mat_list[0], dim=-1)
-                batch_correct, batch_total_valid = calculate_correct_and_valid(prediction_tensor, y_values_matching)
-                
-                
-                error_list = (prediction_tensor != y_values_matching).int()
             
-                for idx, e in enumerate(n_points_gt[0]):
-                    if e.item() not in result_dict:
-                        result_dict[e.item()] = [1, error_list[idx,:e.item()]]
-                    result_dict[e.item()][0] += 1
-                    result_dict[e.item()][1] += error_list[idx,:e.item()]
-                # Iterate through the batch
-                # _tp, _fp, _fn = calculate_f1_score(prediction_tensor, y_values_matching)
-
+            pred_perm_mats = []
+            for idx, (g_i,g_j) in enumerate(pairs):
+                imgs_pair  = [data_list[g_i], data_list[g_j]]
+                pts_pair   = [points_gt[g_i], points_gt[g_j]]
+                edges_pair = [edges[g_i], edges[g_j]]
+                n_points_gt_pair = [n_points_gt[g_i], n_points_gt[g_j]]
+                gt_pair = [perm_mat_list[idx]]
                 
-                epoch_correct += batch_correct
-                epoch_total_valid += batch_total_valid
-                # tp += _tp
-                # fp += _fp
-                # fn += _fn
+                # Debug: Shapes vor forward
+                #print(f"\n--- DEBUG PAIR {g_i},{g_j} ---")
+                #print(" imgs:", [x.shape for x in imgs_pair])
+                #print(" pts:",  [x.shape for x in pts_pair])
+                #print(" ns:",   [x.shape for x in n_points_gt_pair])
+                #print(" gt_pm:", [x.shape for x in gt_pair])
+                
+                with torch.no_grad():
+                    sim, _, _, _ = model(
+                        images            = imgs_pair,
+                        points            = pts_pair,
+                        graphs            = edges_pair,
+                        n_points          = n_points_gt_pair,
+                        n_points_sample   = n_points_gt_pair[0],
+                        perm_mats         = [perm_mat_list[idx]],
+                        eval_pred_points  = None,
+                        in_training       = False,
+                    )
+                
+                P_sink = sinkhorn_logspace(sim) # [B, Ni, Nj]
+                N_s, N_t = P_sink.size(1), P_sink.size(2)
+                
+                # Row-wise argmax
+                sink_max = torch.argmax(P_sink, dim=-1)  # [B, N_s]
+
+                # Baue harte Permutationsmatrix per Batch
+                P_pred = torch.zeros(batch_num, N_s, N_t, device=device)
+                for b in range(batch_num):
+                    for src in range(N_s):
+                        if src < n_points_gt[g_i][b]:
+                            tgt = sink_max[b, src].item()
+                            P_pred[b, src, tgt] = 1
+                pred_perm_mats.append(P_pred)
+
+            # --- 4) Synchronisation falls K>2 ---
+            #if K > 2:
+            #    synced = permutation_synchronization(pred_perm_mats, pairs)
+            #else:
+            synced = [
+                { pairs[idx]: pred_perm_mats[idx][b] for idx in range(len(pairs)) }
+                for b in range(batch_num)
+            ]
+
+            # --- 5) Accuracy & Error-Distribution ---
+            for p_idx, (g_i, g_j) in enumerate(pairs):
+                P_gt = perm_mat_list[p_idx]
+                for b in range(batch_num):
+                    P_syn = synced[b][(g_i, g_j)]
+                    valid = (P_gt[b].sum(dim=1) > 0)
+                    if valid.sum().item() == 0:
+                        continue
+
+                    pred_inds = P_syn.argmax(dim=1).unsqueeze(0)  # [1, N_s]
+                    gt_inds   = P_gt[b].argmax(dim=1).unsqueeze(0)
+                    batch_corr, batch_valid = calculate_correct_and_valid(pred_inds, gt_inds)
+
+                    epoch_correct     += batch_corr
+                    epoch_total_valid += batch_valid
+
+                    # Fehler-Statistik pro n_keypoints von Graph i
+                    n_pts = int(n_points_gt[g_i][b].item())
+                    err   = (pred_inds[0,:n_pts] != gt_inds[0,:n_pts]).int()
+                    if n_pts not in result_dict:
+                        result_dict[n_pts] = [0, torch.zeros(n_pts, device=device)]
+                    result_dict[n_pts][0] += 1
+                    result_dict[n_pts][1] += err
             
             if iter_num % 40 == 0 and verbose: #cfg.STATISTIC_STEP
                 running_speed = 40 * batch_num / (time.time() - running_since) #cfg.STATISTIC_STEP
@@ -239,10 +259,10 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
         # Global F1 score
         # epoch_f1 = 2 * (precision_global * recall_global) / (precision_global + recall_global + 1e-8)
         
-        accs[i] = epoch_acc
+        accs[cls_inx] = epoch_acc
         # f1_scores[i] = epoch_f1
         if verbose:
-            print("Class {} acc = {:.4f}".format(cls, accs[i]))
+            print("Class {} acc = {:.4f}".format(cls, accs[cls_inx]))
             
         error_dist_dict[cls] = result_dict
         

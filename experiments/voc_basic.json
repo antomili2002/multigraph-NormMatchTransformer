@@ -4,7 +4,7 @@
   "exclude_willow_classes": false,
   "EVAL": {
     "SAMPLES": 1000,
-    "num_graphs_in_matching_instance": 2
+    "num_graphs_in_matching_instance": 3
   },
   "SPLINE_CNN": {
     "input_features": 1024,
@@ -46,7 +46,7 @@
   "visualization_params": {
     "reduced_vis": true
   },
-  "evaluate_only": false,
+  "evaluate_only": true,
   "model_dir": "./results/voc_basic/NMT",
   "log_dir": "runs/",
   "MODEL_ARCH": "NMT"

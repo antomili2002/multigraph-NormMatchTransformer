@@ -229,16 +229,37 @@ class NMT(utils.backbone.VGG16_bn):
 
         assert h_s.size(0) == h_t.size(0), 'batch-sizes are not equal'
         
+        # padding for unequal keypoints        
+        seq_s = h_s.size(1)   # 1 + n_points_src
+        seq_t = h_t.size(1)   # 1 + n_points_tgt
+        dim   = h_s.size(2)
+        max_seq = max(seq_s, seq_t)
+
+        max_seq = max(seq_s, seq_t)
+        if seq_s < max_seq:
+            pad = torch.zeros((batch_size, max_seq-seq_s, dim), device=h_s.device)
+            h_s = torch.cat([h_s, pad], dim=1)
+        if seq_t < max_seq:
+            pad = torch.zeros((batch_size, max_seq-seq_t, dim), device=h_t.device)
+            h_t = torch.cat([h_t, pad], dim=1)
+        
         batch_size, seq_len, _ = h_s.shape
         padding_mask = torch.zeros((batch_size, seq_len, seq_len), dtype=torch.bool).to(h_s.device)
-        if in_training is True:
-            for idx, e in enumerate(n_points_sample):
-                h_s[idx, e+1:, :] = 0
-                h_t[idx, e+1:, :] = 0
+        
+        for idx, e in enumerate(n_points_sample):
+            h_s[idx, e+1:, :] = 0
+            h_t[idx, e+1:, :] = 0
                 
-                padding_mask[idx, :, e+1:] = 1
-                padding_mask[idx, e+1:, :] = 1
-            
+            padding_mask[idx, :, e+1:] = 1
+            padding_mask[idx, e+1:, :] = 1
+        
+        #print(f"\n>>> IN NMT.forward")
+        #print(f" batch_size = {batch_size}")
+        #print(f" h_s.shape = {h_s.shape}")        # (batch_size, seq_len, dim)
+        #print(f" h_t.shape = {h_t.shape}")
+        #print(f" mask.shape = {mask.shape}")      # should be (batch_size, seq_len, seq_len)
+        #print(f" padding_mask.shape = {padding_mask.shape}")
+        
         hs_dec_output, layer_losses1 = self.n_gpt_decoder(source_nodes = h_s, padding_mask=padding_mask, encoder_output=h_t)
         ht_dec_output, layer_losses2 = self.n_gpt_decoder_2(source_nodes = h_t, padding_mask=padding_mask, encoder_output=h_s)
         
