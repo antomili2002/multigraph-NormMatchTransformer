@@ -109,6 +109,56 @@ def permutation_synchronization(pred_perm_mats, pairs):
 
     return synced_batches
 
+@torch.no_grad()
+def check_cycle_consistency(pred_perm_mats,          # List[len(pairs)] of [B, Ni, Nj] tensors
+                            pairs,                   # same order as pred_perm_mats
+                            n_points_gt,             # list of K tensors [B]  (for masking padded rows)
+                            atol=1e-6):              # tolerance for equality test
+    """
+    Checks 3‑cycle consistency for every batch sample.
+
+    For each triple (i, j, k) we expect:
+          P_ij · P_jk  ≈  P_ik
+
+    Counts how many source keypoints violate this equality.
+
+    Returns
+    -------
+    cycle_err   : int        total #inconsistent keypoints in the batch
+    cycle_total : int        total #checked keypoints in the batch
+    """
+
+    # Build dict[(i,j)] -> tensor[B, Ni, Nj]  for faster lookup
+    Pdict = {pair: P for pair, P in zip(pairs, pred_perm_mats)}
+
+    K = len(n_points_gt)                 # number of graphs in the instance
+    triples = list(combinations(range(K), 3))
+    B = pred_perm_mats[0].size(0)
+
+    cycle_err = 0
+    cycle_tot = 0
+
+    for (i, j, k) in triples:            # all 3‑cycles
+        P_ij = Pdict[(i, j)]             # [B, Ni, Nj]
+        P_jk = Pdict[(j, k)]             # [B, Nj, Nk]
+        P_ik = Pdict[(i, k)]             # [B, Ni, Nk]
+
+        # Matrix product in parallel over batch
+        composed = torch.bmm(P_ij, P_jk)            # [B, Ni, Nk]
+
+        # Hard 0/1 comparison -> difference
+        diff = (composed - P_ik).abs() > atol       # Bool tensor
+
+        # Mask padded rows ( > ns[i] )
+        Ni = P_ij.size(1)
+        for b in range(B):
+            valid_rows = int(n_points_gt[i][b].item())
+            diff[b, valid_rows:, :] = False         # ignore padded
+
+        cycle_err += diff.sum().item()
+        cycle_tot += diff.numel() - diff[:,Ni:, :].numel()  # only valid rows
+
+    return cycle_err, cycle_tot
 
 def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verbose=True):
     print("Start evaluation...")
@@ -166,6 +216,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
             #num_nodes_t = points_gt[1].size(1)
             
             pred_perm_mats = []
+            
             for idx, (g_i,g_j) in enumerate(pairs):
                 imgs_pair  = [data_list[g_i], data_list[g_j]]
                 pts_pair   = [points_gt[g_i], points_gt[g_j]]
@@ -215,7 +266,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                 { pairs[idx]: pred_perm_mats[idx][b] for idx in range(len(pairs)) }
                 for b in range(batch_num)
             ]
-
+            
             # --- 5) Accuracy & Error-Distribution ---
             for p_idx, (g_i, g_j) in enumerate(pairs):
                 P_gt = perm_mat_list[p_idx]
@@ -239,6 +290,18 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                         result_dict[n_pts] = [0, torch.zeros(n_pts, device=device)]
                     result_dict[n_pts][0] += 1
                     result_dict[n_pts][1] += err
+
+            #cycle_err, cycle_tot = check_cycle_consistency(
+            #    pred_perm_mats=pred_perm_mats,
+            #    pairs=pairs,
+            #    n_points_gt=n_points_gt,
+            #    atol=1e-8
+            #)
+            #if verbose and local_rank == output_rank:
+            #    pct = 100 * cycle_err / max(1, cycle_tot)
+            #    print(f"[Cycle‑Chk]  batch {iter_num:<4}  "
+            #          f"inconsistent: {cycle_err}/{cycle_tot}  "
+            #          f"({pct:5.2f} %)")
             
             if iter_num % 40 == 0 and verbose: #cfg.STATISTIC_STEP
                 running_speed = 40 * batch_num / (time.time() - running_since) #cfg.STATISTIC_STEP
