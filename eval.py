@@ -6,9 +6,10 @@ import torch.nn.functional as F
 import torch.distributed as dist  # Add this import
 from scipy.optimize import linear_sum_assignment
 from itertools import combinations
+from permsync import perm_sync_batched, error_against_ground_truth_batched
 
 from utils.config import cfg
-from utils.evaluation_metric import calculate_correct_and_valid, calculate_f1_score
+from utils.evaluation_metric import calculate_correct_and_valid, calculate_f1_score, matching_accuracy, matching_accuracy_from_lists
 from scipy.linalg import eigh
 
 def sinkhorn_logspace(
@@ -40,125 +41,6 @@ def sinkhorn_logspace(
 
     Q = torch.exp(log_Q)
     return Q
-
-def permutation_synchronization(pred_perm_mats, pairs):
-    """
-    pred_perm_mats: List[L] von Tensoren (B x Ni x Nj)
-    pairs:         List[L] von Tupeln (i,j) für K Graphen
-    return:        List[B] von Dict[(i,j) -> P_syn (Ni x Nj)]
-    """
-    B = pred_perm_mats[0].size(0)
-    # for each graph get K and Ni 
-    nodes = set()
-    for i,j in pairs:
-        nodes.add(i); nodes.add(j)
-    K = max(nodes) + 1
-
-    N = [None]*K
-    for idx, (i,j) in enumerate(pairs):
-        _, Ni, Nj = pred_perm_mats[idx].shape
-        if N[i] is None: N[i] = Ni
-        if N[j] is None: N[j] = Nj
-
-    offsets = [0]*K
-    for i in range(1, K):
-        offsets[i] = offsets[i-1] + N[i-1]
-    Ntot = sum(N)
-
-    synced_batches = [dict() for _ in range(B)]
-
-    for b in range(B):
-        H = torch.zeros(Ntot, Ntot, device=pred_perm_mats[0].device)
-        # diag
-        for i in range(K):
-            o = offsets[i]
-            H[o:o+N[i], o:o+N[i]] = torch.eye(N[i], device=H.device)
-        # Off-diag
-        for idx, (i,j) in enumerate(pairs):
-            oi, oj = offsets[i], offsets[j]
-            Pij = pred_perm_mats[idx][b]
-            H[oi:oi+N[i], oj:oj+N[j]] = Pij
-            H[oj:oj+N[j], oi:oi+N[i]] = Pij.t()
-
-        # spectral decomposition 
-        H_sym = (H + H.transpose(0, 1)) / 2
-        d = max(N)
-        # take biggest d eigenvectors
-        try:
-            e_vals, e_vecs = torch.linalg.eigh(H_sym)
-            U = e_vecs[:, -d:]    # Ntot x d
-        except RuntimeError:
-            # Fallback auf CPU + NumPy
-            H_cpu = H_sym.cpu().numpy()
-            H_cpu = (H_cpu + H_cpu.T) / 2
-            vals, vecs = np.linalg.eigh(H_cpu)
-            U = torch.from_numpy(vecs[:, -d:]).to(H_sym.device)
-
-        # 3) Für jedes Paar (i,j) Hungarian
-        for (i,j) in pairs:
-            oi, oj = offsets[i], offsets[j]
-            Ui = U[oi:oi+N[i], :]   # Ni x d
-            Uj = U[oj:oj+N[j], :]   # Nj x d
-            S = (Ui @ Uj.t()).cpu().numpy()  # Ni x Nj
-
-            # Hungarian max: cost = -S
-            row_ind, col_ind = linear_sum_assignment(-S)
-            P_syn = torch.zeros(N[i], N[j], device=H.device)
-            P_syn[row_ind, col_ind] = 1.0
-            synced_batches[b][(i,j)] = P_syn
-
-    return synced_batches
-
-@torch.no_grad()
-def check_cycle_consistency(pred_perm_mats,          # List[len(pairs)] of [B, Ni, Nj] tensors
-                            pairs,                   # same order as pred_perm_mats
-                            n_points_gt,             # list of K tensors [B]  (for masking padded rows)
-                            atol=1e-6):              # tolerance for equality test
-    """
-    Checks 3‑cycle consistency for every batch sample.
-
-    For each triple (i, j, k) we expect:
-          P_ij · P_jk  ≈  P_ik
-
-    Counts how many source keypoints violate this equality.
-
-    Returns
-    -------
-    cycle_err   : int        total #inconsistent keypoints in the batch
-    cycle_total : int        total #checked keypoints in the batch
-    """
-
-    # Build dict[(i,j)] -> tensor[B, Ni, Nj]  for faster lookup
-    Pdict = {pair: P for pair, P in zip(pairs, pred_perm_mats)}
-
-    K = len(n_points_gt)                 # number of graphs in the instance
-    triples = list(combinations(range(K), 3))
-    B = pred_perm_mats[0].size(0)
-
-    cycle_err = 0
-    cycle_tot = 0
-
-    for (i, j, k) in triples:            # all 3‑cycles
-        P_ij = Pdict[(i, j)]             # [B, Ni, Nj]
-        P_jk = Pdict[(j, k)]             # [B, Nj, Nk]
-        P_ik = Pdict[(i, k)]             # [B, Ni, Nk]
-
-        # Matrix product in parallel over batch
-        composed = torch.bmm(P_ij, P_jk)            # [B, Ni, Nk]
-
-        # Hard 0/1 comparison -> difference
-        diff = (composed - P_ik).abs() > atol       # Bool tensor
-
-        # Mask padded rows ( > ns[i] )
-        Ni = P_ij.size(1)
-        for b in range(B):
-            valid_rows = int(n_points_gt[i][b].item())
-            diff[b, valid_rows:, :] = False         # ignore padded
-
-        cycle_err += diff.sum().item()
-        cycle_tot += diff.numel() - diff[:,Ni:, :].numel()  # only valid rows
-
-    return cycle_err, cycle_tot
 
 def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verbose=True):
     print("Start evaluation...")
@@ -228,7 +110,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                 #print(f"\n--- DEBUG PAIR {g_i},{g_j} ---")
                 #print(" imgs:", [x.shape for x in imgs_pair])
                 #print(" pts:",  [x.shape for x in pts_pair])
-                #print(" ns:",   [x.shape for x in n_points_gt_pair])
+                #print(" n_points:",   [x.shape for x in n_points_gt_pair])
                 #print(" gt_pm:", [x.shape for x in gt_pair])
                 
                 with torch.no_grad():
@@ -257,21 +139,48 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                             tgt = sink_max[b, src].item()
                             P_pred[b, src, tgt] = 1
                 pred_perm_mats.append(P_pred)
-
-            # --- 4) Synchronisation falls K>2 ---
-            #if K > 2:
-            #    synced = permutation_synchronization(pred_perm_mats, pairs)
-            #else:
-            synced = [
-                { pairs[idx]: pred_perm_mats[idx][b] for idx in range(len(pairs)) }
-                for b in range(batch_num)
-            ]
             
-            # --- 5) Accuracy & Error-Distribution ---
+            #accs, _, _ = matching_accuracy_from_lists(pred_perm_mats, perm_mat_list)
+            #print(f"pairewise accs: {accs}")
+            
+            # permutation synchronization if K > 2
+            N_s = pred_perm_mats[0].shape[1]  # assumes square permutations: [B, N_s, N_t]
+            T_tensor = torch.eye(N_s, device=device).repeat(batch_num, K, K, 1, 1)
+
+            for idx, (i, j) in enumerate(pairs):
+                T_tensor[:, i, j] = pred_perm_mats[idx]
+                T_tensor[:, j, i] = pred_perm_mats[idx].transpose(1, 2)
+                
+            if K > 2:
+                tau = perm_sync_batched(T_tensor)
+                gt_perm_tensor = torch.eye(N_s, device=device).repeat(batch_num, K, 1, 1) # [B, K, n, n]
+
+                # perm_mat_list[p_idx] has shape [B, n, n] and corresponds to pairs[p_idx]
+                pair_to_idx = {p: idx for idx, p in enumerate(pairs)}
+
+                for k in range(1, K):
+                    idx = pair_to_idx[(0, k)]     # ground-truth map graph-0 -> graph-k
+                    gt_perm_tensor[:, k] = perm_mat_list[idx]          # P_{0->k}   
+            else:
+                tau = T_tensor
+            
+            sync_pred_list = []
+            sync_gt_list = []
+
+            for p_idx, (g_i, g_j) in enumerate(pairs):
+                for b in range(batch_num):
+                    sync_pred_list.append(tau[b, g_i, g_j])
+                    sync_gt_list.append(perm_mat_list[p_idx][b])
+
+            acc_sync, _, _ = matching_accuracy_from_lists(sync_pred_list, sync_gt_list)
+            #print(f"Total synchronized matching acc: {acc_sync.item():.4f}")    
+            
+            # accurancy and error, computation not correct?
+            # --------------------------------------------------------------------
             for p_idx, (g_i, g_j) in enumerate(pairs):
                 P_gt = perm_mat_list[p_idx]
                 for b in range(batch_num):
-                    P_syn = synced[b][(g_i, g_j)]
+                    P_syn = tau[b, g_i, g_j]
                     valid = (P_gt[b].sum(dim=1) > 0)
                     if valid.sum().item() == 0:
                         continue
@@ -290,19 +199,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                         result_dict[n_pts] = [0, torch.zeros(n_pts, device=device)]
                     result_dict[n_pts][0] += 1
                     result_dict[n_pts][1] += err
-
-            #cycle_err, cycle_tot = check_cycle_consistency(
-            #    pred_perm_mats=pred_perm_mats,
-            #    pairs=pairs,
-            #    n_points_gt=n_points_gt,
-            #    atol=1e-8
-            #)
-            #if verbose and local_rank == output_rank:
-            #    pct = 100 * cycle_err / max(1, cycle_tot)
-            #    print(f"[Cycle‑Chk]  batch {iter_num:<4}  "
-            #          f"inconsistent: {cycle_err}/{cycle_tot}  "
-            #          f"({pct:5.2f} %)")
-            
+            # ----------------------------------------------------------------------------------
             if iter_num % 40 == 0 and verbose: #cfg.STATISTIC_STEP
                 running_speed = 40 * batch_num / (time.time() - running_since) #cfg.STATISTIC_STEP
                 print("Class {:<8} Iteration {:<4} {:>4.2f}sample/s".format(cls, iter_num, running_speed))
@@ -322,7 +219,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
         # Global F1 score
         # epoch_f1 = 2 * (precision_global * recall_global) / (precision_global + recall_global + 1e-8)
         
-        accs[cls_inx] = epoch_acc
+        accs[cls_inx] = acc_sync
         # f1_scores[i] = epoch_f1
         if verbose:
             print("Class {} acc = {:.4f}".format(cls, accs[cls_inx]))
