@@ -362,6 +362,27 @@ class PascalVOC:
 
             for x in to_del:
                 self.xml_list[cls_id].remove(x)
+    
+    def _filter_to_common_kpts(self, anno_list):
+        """
+        Trim every annotation dict to the *global* intersection of key-point names.
+        Guarantees |K_i| is identical for all i.
+        """
+        if len(anno_list) < 2:
+            return anno_list                        # nothing to do
+
+        # gather the intersection of names across ALL graphs in the sample
+        common = set.intersection(*[
+            {kp["name"] for kp in anno["keypoints"]}
+            for anno in anno_list
+        ])
+
+        # keep only those kpts & preserve order
+        for anno in anno_list:
+            anno["keypoints"] = [
+                kp for kp in anno["keypoints"] if kp["name"] in common
+            ]
+        return anno_list
 
     def get_k_samples(self, idx, k, mode, cls=None, shuffle=True, num_iterations=200):
         """
@@ -408,6 +429,7 @@ class PascalVOC:
                 if len(anno_list) == k:  # k samples found that match restrictions
                     break
             assert len(anno_list) == k
+            anno_list = self._filter_to_common_kpts(anno_list)
         elif mode == "all":
             anno_list = []
             for xml_name in random.sample(self.xml_list[cls], k):
