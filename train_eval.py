@@ -330,7 +330,7 @@ if __name__ == "__main__":
     import os
 
 
-    #os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
     os.makedirs(cfg.model_dir, exist_ok=True)
     with open(os.path.join(cfg.model_dir, "settings.json"), "w") as f:
         json.dump(cfg, f)

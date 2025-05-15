@@ -9,7 +9,7 @@ from itertools import combinations
 from permsync import perm_sync_batched, error_against_ground_truth_batched
 
 from utils.config import cfg
-from utils.evaluation_metric import calculate_correct_and_valid, calculate_f1_score, matching_accuracy, matching_accuracy_from_lists
+from utils.evaluation_metric import calculate_correct_and_valid, matching_accuracy_from_lists, perm_distance_masked
 from scipy.linalg import eigh
 
 def sinkhorn_logspace(
@@ -66,7 +66,6 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
     accs = torch.zeros(len(classes), device=device)
     #f1_scores = torch.zeros(len(classes), device=device)
     error_dist_dict = {}
-    
     pairs = list(combinations(range(K), 2))
     
     for cls_inx, cls in enumerate(classes):
@@ -78,13 +77,12 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
         iter_num = 0
         ds.set_cls(cls)
         
+        pre_acc_tot, post_acc_tot = 0.0, 0.0
+        pre_dist_tot, post_dist_tot = 0.0, 0.0
+        pair_cnt        = 0
         result_dict = {}
-        tp = 0
-        fp = 0
-        fn = 0
-        epoch_f1 = 0.0
-        epoch_correct = 0
-        epoch_total_valid = 0
+        epoch_correct, epoch_total_valid = 0.0, 0.0
+        
         for k, inputs in enumerate(dataloader, 1):
             iter_num = iter_num + 1
             data_list = [_.cuda() for _ in inputs["images"]]
@@ -93,25 +91,14 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
             edges = [_.to("cuda") for _ in inputs["edges"]]
             perm_mat_list = [perm_mat.cuda() for perm_mat in inputs["gt_perm_mat"]]
 
-            batch_num = data_list[0].size(0)
-            #num_nodes_s = points_gt[0].size(1)
-            #num_nodes_t = points_gt[1].size(1)
+            batch_num = data_list[0].size(0)    # batch size
+            pred_perm_mats = []                 # pairewise prediction
             
-            pred_perm_mats = []
-            
-            for idx, (g_i,g_j) in enumerate(pairs):
+            for idx, (g_i,g_j) in enumerate(pairs):     # pairewise inference loop
                 imgs_pair  = [data_list[g_i], data_list[g_j]]
                 pts_pair   = [points_gt[g_i], points_gt[g_j]]
                 edges_pair = [edges[g_i], edges[g_j]]
                 n_points_gt_pair = [n_points_gt[g_i], n_points_gt[g_j]]
-                gt_pair = [perm_mat_list[idx]]
-                
-                # Debug: Shapes vor forward
-                #print(f"\n--- DEBUG PAIR {g_i},{g_j} ---")
-                #print(" imgs:", [x.shape for x in imgs_pair])
-                #print(" pts:",  [x.shape for x in pts_pair])
-                #print(" n_points:",   [x.shape for x in n_points_gt_pair])
-                #print(" gt_pm:", [x.shape for x in gt_pair])
                 
                 with torch.no_grad():
                     sim, _, _, _ = model(
@@ -139,90 +126,87 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                             tgt = sink_max[b, src].item()
                             P_pred[b, src, tgt] = 1
                 pred_perm_mats.append(P_pred)
+
+            perm_mats_masked, pred_mats_masked = [], []
+            # slice out invalid padding of perm_mats and pred_mats
+            for idx, (g_i, g_j) in enumerate(pairs):
+                n_i = n_points_gt[g_i]  # shape [B]
+                n_j = n_points_gt[g_j]  # shape [B]
+                for b in range(batch_num):
+                    ni = n_i[b].item()
+                    nj = n_j[b].item()
+                    # slice away all padded rows/cols
+                    P_pred_valid = P_pred[b, :ni, :nj]      # [ni × nj]
+                    P_gt_valid = perm_mat_list[idx][b][:ni, :nj]
+                    pred_mats_masked.append(P_pred_valid)
+                    perm_mats_masked.append(P_gt_valid)
             
-            #accs, _, _ = matching_accuracy_from_lists(pred_perm_mats, perm_mat_list)
-            #print(f"pairewise accs: {accs}")
+            acc_pre, _, _ = matching_accuracy_from_lists(pred_mats_masked, perm_mats_masked)
+            pre_acc_tot += acc_pre.item()
             
             # permutation synchronization if K > 2
             N_s = pred_perm_mats[0].shape[1]  # assumes square permutations: [B, N_s, N_t]
             T_tensor = torch.eye(N_s, device=device).repeat(batch_num, K, K, 1, 1)
-
             for idx, (i, j) in enumerate(pairs):
                 T_tensor[:, i, j] = pred_perm_mats[idx]
                 T_tensor[:, j, i] = pred_perm_mats[idx].transpose(1, 2)
                 
-            if K > 2:
-                tau = perm_sync_batched(T_tensor)
-                gt_perm_tensor = torch.eye(N_s, device=device).repeat(batch_num, K, 1, 1) # [B, K, n, n]
-
-                # perm_mat_list[p_idx] has shape [B, n, n] and corresponds to pairs[p_idx]
-                pair_to_idx = {p: idx for idx, p in enumerate(pairs)}
-
-                for k in range(1, K):
-                    idx = pair_to_idx[(0, k)]     # ground-truth map graph-0 -> graph-k
-                    gt_perm_tensor[:, k] = perm_mat_list[idx]          # P_{0->k}   
-            else:
-                tau = T_tensor
+            tau = perm_sync_batched(T_tensor) if K > 2 else T_tensor
             
-            sync_pred_list = []
-            sync_gt_list = []
-
-            for p_idx, (g_i, g_j) in enumerate(pairs):
-                for b in range(batch_num):
-                    sync_pred_list.append(tau[b, g_i, g_j])
-                    sync_gt_list.append(perm_mat_list[p_idx][b])
-
-            acc_sync, _, _ = matching_accuracy_from_lists(sync_pred_list, sync_gt_list)
-            #print(f"Total synchronized matching acc: {acc_sync.item():.4f}")    
+            sync_pred, sync_gt = [], []
+            for idx, (i, j) in enumerate(pairs):
+                sync_pred.extend(tau[:, i, j])
+                sync_gt.extend (perm_mat_list[idx])
+            acc_post, _, _ = matching_accuracy_from_lists(sync_pred, sync_gt)   
+            post_acc_tot += acc_post.item()
             
-            # accurancy and error, computation not correct?
-            # --------------------------------------------------------------------
-            for p_idx, (g_i, g_j) in enumerate(pairs):
-                P_gt = perm_mat_list[p_idx]
+            # distance before and after (masked)
+            for idx, (i, j) in enumerate(pairs):
+                n_valid = n_points_gt[i]              # [B]
+                pre_dist  = perm_distance_masked(T_tensor[:,   i, j], perm_mat_list[idx], n_valid)
+                post_dist = perm_distance_masked(tau[:, i, j], perm_mat_list[idx], n_valid)
+
+                pre_dist_tot  += pre_dist.item()  * batch_num
+                post_dist_tot += post_dist.item() * batch_num
+                pair_cnt      += batch_num
+            
+           # ------------- per-batch row/col accuracy for logging --------- #
+            for idx, (i, j) in enumerate(pairs):
+                P_gt = perm_mat_list[idx]     # [B,n,n]
                 for b in range(batch_num):
-                    P_syn = tau[b, g_i, g_j]
-                    valid = (P_gt[b].sum(dim=1) > 0)
-                    if valid.sum().item() == 0:
+                    P_syn  = tau[b, i, j]
+                    if P_gt[b].sum() == 0:    # empty GT -> skip
                         continue
 
-                    pred_inds = P_syn.argmax(dim=1).unsqueeze(0)  # [1, N_s]
-                    gt_inds   = P_gt[b].argmax(dim=1).unsqueeze(0)
-                    batch_corr, batch_valid = calculate_correct_and_valid(pred_inds, gt_inds)
+                    pred_idx = P_syn.argmax(dim=1).unsqueeze(0)
+                    gt_idx   = P_gt[b].argmax(dim=1).unsqueeze(0)
+                    corr, valid = calculate_correct_and_valid(pred_idx, gt_idx)
+                    epoch_correct     += corr
+                    epoch_total_valid += valid
 
-                    epoch_correct     += batch_corr
-                    epoch_total_valid += batch_valid
-
-                    # Fehler-Statistik pro n_keypoints von Graph i
-                    n_pts = int(n_points_gt[g_i][b].item())
-                    err   = (pred_inds[0,:n_pts] != gt_inds[0,:n_pts]).int()
+                    # ---------- per-keypoint error distribution ----------- #
+                    n_pts = int(n_points_gt[i][b])
+                    err_vec = (pred_idx[0, :n_pts] != gt_idx[0, :n_pts]).int()
                     if n_pts not in result_dict:
                         result_dict[n_pts] = [0, torch.zeros(n_pts, device=device)]
                     result_dict[n_pts][0] += 1
-                    result_dict[n_pts][1] += err
-            # ----------------------------------------------------------------------------------
+                    result_dict[n_pts][1] += err_vec
+            
+            # progress print every 40 batches
             if iter_num % 40 == 0 and verbose: #cfg.STATISTIC_STEP
                 running_speed = 40 * batch_num / (time.time() - running_since) #cfg.STATISTIC_STEP
                 print("Class {:<8} Iteration {:<4} {:>4.2f}sample/s".format(cls, iter_num, running_speed))
                 running_since = time.time()
         
-        
-        dataset_size = len(dataloader.dataset)
-        
-        if epoch_total_valid > 0:
-            epoch_acc = epoch_correct / epoch_total_valid
-        else:
-            epoch_acc = 0.0
-
-        # precision_global = tp / (tp + fp + 1e-8)
-        # recall_global = tp / (tp + fn + 1e-8)
-        
-        # Global F1 score
-        # epoch_f1 = 2 * (precision_global * recall_global) / (precision_global + recall_global + 1e-8)
-        
-        accs[cls_inx] = acc_sync
+        dist_b = pre_dist_tot  / pair_cnt
+        dist_a = post_dist_tot / pair_cnt
+        acc_pre_cls  = pre_acc_tot  / iter_num
+        acc_post_cls = post_acc_tot / iter_num
+        accs[cls_inx] = acc_post_cls
         # f1_scores[i] = epoch_f1
         if verbose:
-            print("Class {} acc = {:.4f}".format(cls, accs[cls_inx]))
+            print(f"Class {cls} acc_pre_sync = {acc_pre_cls:.4f} acc_post_sync = {acc_post_cls:.4f}")
+            print(f"Avg distance  : before={dist_b:.3f} | after={dist_a:.3f}")
             
         error_dist_dict[cls] = result_dict
         

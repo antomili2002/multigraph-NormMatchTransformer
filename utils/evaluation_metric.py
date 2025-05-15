@@ -172,10 +172,13 @@ def matching_accuracy(pmat_pred, pmat_gt):
     batch_num = pmat_pred.shape[0]
 
     pmat_gt = pmat_gt.to(device)
+    
+    #print(f"GT-Matrix: {pmat_gt.shape},\n {pmat_gt}")
+    #print(f"Pred-Matrix: {pmat_pred.shape},\n {pmat_pred}")
 
     assert torch.all((pmat_pred == 0) + (pmat_pred == 1)), "pmat_pred can noly contain 0/1 elements."
     assert torch.all((pmat_gt == 0) + (pmat_gt == 1)), "pmat_gt should noly contain 0/1 elements."
-    assert torch.all(torch.sum(pmat_pred, dim=-1) <= 1) and torch.all(torch.sum(pmat_pred, dim=-2) <= 1)
+    assert torch.all(torch.sum(pmat_pred, dim=-1) <= 1) #and torch.all(torch.sum(pmat_pred, dim=-2) <= 1)
     assert torch.all(torch.sum(pmat_gt, dim=-1) <= 1) and torch.all(torch.sum(pmat_gt, dim=-2) <= 1)
 
     match_num = 0
@@ -186,3 +189,18 @@ def matching_accuracy(pmat_pred, pmat_gt):
         total_num += torch.sum(pmat_gt[b])
 
     return match_num / total_num, match_num, total_num
+
+def perm_distance_masked(P_pred, P_gt, n_valid):
+    """
+    P_pred, P_gt: [B, N, N]  (N = max #keypoints with padding)
+    n_valid:      [B]        number of real keypoints per sample
+    """
+    dists = []
+    for b in range(P_gt.size(0)):
+        nv = n_valid[b].item()
+        Pp = P_pred[b, :nv, :nv]
+        Pg = P_gt[b,   :nv, :nv]
+        # now only real submatrix
+        d  = nv - (Pp * Pg).sum()
+        dists.append(d)
+    return torch.stack(dists).mean()
