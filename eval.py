@@ -42,6 +42,40 @@ def sinkhorn_logspace(
     Q = torch.exp(log_Q)
     return Q
 
+def hard_perm_from_sink(P_sink: torch.Tensor) -> torch.Tensor:
+    """
+    P_sink: Tensor [B, N, N]
+    returns P_pred: Tensor [B, N, N] each a valid permutation
+    """
+    B, N, T = P_sink.shape
+    P_pred = torch.zeros_like(P_sink)
+    cost = -P_sink.detach().cpu().numpy() # maximize P_sink
+    for b in range(B):
+        r, c = linear_sum_assignment(cost[b])
+        P_pred[b, r, c] = 1
+    return P_pred.to(P_sink.device)
+
+def count_inconsistent_cycles(pairwise: torch.Tensor):
+    """
+    pairwise: Tensor of shape (K, K, n, n) giving P_{ij} for one batch item.
+    Returns total number of inconsistent triples (i<j<k).
+    """
+    K, _, n, _ = pairwise.shape
+    total_bad = 0
+    for i in range(K):
+        for j in range(i+1, K):
+            for k in range(j+1, K):
+                # Compose P_ij * P_jk * P_ki
+                C = pairwise[i,j] @ pairwise[j,k] @ pairwise[k,i]
+                # how far from identity?
+                # If it were perfect, C would equal I exactly.
+                # Count any off-diagonal or missing diagonal entries:
+                deviation = torch.abs(C - torch.eye(n, device=C.device))
+                # If you want just a binary flag:
+                if (deviation > 1e-4).any():
+                    total_bad += 1
+    return total_bad
+
 def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verbose=True):
     print("Start evaluation...")
     since = time.time()
@@ -63,7 +97,8 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
     classes = ds.classes
     cls_cache = ds.cls
 
-    accs = torch.zeros(len(classes), device=device)
+    accs_pre_sync = torch.zeros(len(classes), device=device)
+    accs_post_sync = torch.zeros(len(classes), device=device)
     #f1_scores = torch.zeros(len(classes), device=device)
     error_dist_dict = {}
     pairs = list(combinations(range(K), 2))
@@ -77,11 +112,13 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
         iter_num = 0
         ds.set_cls(cls)
         
-        pre_acc_tot, post_acc_tot = 0.0, 0.0
-        pre_dist_tot, post_dist_tot = 0.0, 0.0
+        pre_acc_tot, post_acc_tot = 0.0, 0.0        # accurancy acc. before and after sync
+        #pre_dist_tot, post_dist_tot = 0.0, 0.0      # distance acc.
         pair_cnt        = 0
         result_dict = {}
-        epoch_correct, epoch_total_valid = 0.0, 0.0
+        epoch_correct, epoch_total_valid = 0.0, 0.0 # epoch acc.
+        bad_pre_tot, bad_post_tot = 0.0, 0.0        # inconsistent cycles acc.
+        num_batches = 0
         
         for k, inputs in enumerate(dataloader, 1):
             iter_num = iter_num + 1
@@ -116,15 +153,16 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                 N_s, N_t = P_sink.size(1), P_sink.size(2)
                 
                 # Row-wise argmax
-                sink_max = torch.argmax(P_sink, dim=-1)  # [B, N_s]
+                #sink_max = torch.argmax(P_sink, dim=-1)  # [B, N_s]
 
                 # Baue harte Permutationsmatrix per Batch
-                P_pred = torch.zeros(batch_num, N_s, N_t, device=device)
-                for b in range(batch_num):
-                    for src in range(N_s):
-                        if src < n_points_gt[g_i][b]:
-                            tgt = sink_max[b, src].item()
-                            P_pred[b, src, tgt] = 1
+                #P_pred = torch.zeros(batch_num, N_s, N_t, device=device)
+                #for b in range(batch_num):
+                #    for src in range(N_s):
+                #        if src < n_points_gt[g_i][b]:
+                #            tgt = sink_max[b, src].item()
+                #            P_pred[b, src, tgt] = 1
+                P_pred = hard_perm_from_sink(P_sink)
                 pred_perm_mats.append(P_pred)
 
             perm_mats_masked, pred_mats_masked = [], []
@@ -136,7 +174,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                     ni = n_i[b].item()
                     nj = n_j[b].item()
                     # slice away all padded rows/cols
-                    P_pred_valid = P_pred[b, :ni, :nj]      # [ni × nj]
+                    P_pred_valid = pred_perm_mats[idx][b, :ni, :nj]      # [ni × nj]
                     P_gt_valid = perm_mat_list[idx][b][:ni, :nj]
                     pred_mats_masked.append(P_pred_valid)
                     perm_mats_masked.append(P_gt_valid)
@@ -153,6 +191,14 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                 
             tau = perm_sync_batched(T_tensor) if K > 2 else T_tensor
             
+            # calculation of inconsistent cycles
+            for b in range(batch_num):
+                P_pre = T_tensor[b]
+                P_post = tau[b]
+                bad_pre_tot  += count_inconsistent_cycles(P_pre)
+                bad_post_tot += count_inconsistent_cycles(P_post)
+            num_batches += batch_num
+            
             sync_pred, sync_gt = [], []
             for idx, (i, j) in enumerate(pairs):
                 sync_pred.extend(tau[:, i, j])
@@ -161,14 +207,14 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
             post_acc_tot += acc_post.item()
             
             # distance before and after (masked)
-            for idx, (i, j) in enumerate(pairs):
-                n_valid = n_points_gt[i]              # [B]
-                pre_dist  = perm_distance_masked(T_tensor[:,   i, j], perm_mat_list[idx], n_valid)
-                post_dist = perm_distance_masked(tau[:, i, j], perm_mat_list[idx], n_valid)
+            #for idx, (i, j) in enumerate(pairs):
+            #    n_valid = n_points_gt[i]              # [B]
+            #    pre_dist  = perm_distance_masked(T_tensor[:,   i, j], perm_mat_list[idx], n_valid)
+            #    post_dist = perm_distance_masked(tau[:, i, j], perm_mat_list[idx], n_valid)
 
-                pre_dist_tot  += pre_dist.item()  * batch_num
-                post_dist_tot += post_dist.item() * batch_num
-                pair_cnt      += batch_num
+            #    pre_dist_tot  += pre_dist.item()  * batch_num
+            #    post_dist_tot += post_dist.item() * batch_num
+            #    pair_cnt      += batch_num
             
            # ------------- per-batch row/col accuracy for logging --------- #
             for idx, (i, j) in enumerate(pairs):
@@ -198,15 +244,23 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                 print("Class {:<8} Iteration {:<4} {:>4.2f}sample/s".format(cls, iter_num, running_speed))
                 running_since = time.time()
         
-        dist_b = pre_dist_tot  / pair_cnt
-        dist_a = post_dist_tot / pair_cnt
+        #dist_b = pre_dist_tot  / pair_cnt
+        #dist_a = post_dist_tot / pair_cnt
+        
         acc_pre_cls  = pre_acc_tot  / iter_num
         acc_post_cls = post_acc_tot / iter_num
-        accs[cls_inx] = acc_post_cls
+        
+        accs_pre_sync[cls_inx] = acc_pre_cls
+        accs_post_sync[cls_inx] = acc_post_cls
+        
+        avg_bad_pre = bad_pre_tot / num_batches
+        avg_bad_post = bad_post_tot / num_batches
+        
         # f1_scores[i] = epoch_f1
         if verbose:
             print(f"Class {cls} acc_pre_sync = {acc_pre_cls:.4f} acc_post_sync = {acc_post_cls:.4f}")
-            print(f"Avg distance  : before={dist_b:.3f} | after={dist_a:.3f}")
+            #print(f"Avg distance  : before={dist_b:.3f} | after={dist_a:.3f}")
+            print(f"Avg inconsistent 3-cycles before sync: {avg_bad_pre:.2f}, after sync: {avg_bad_post:.2f}")
             
         error_dist_dict[cls] = result_dict
         
@@ -218,8 +272,8 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
     ds.cls = cls_cache
 
     print("Matching accuracy")
-    for cls, single_acc in zip(classes, accs):
-        print("{} = {:.4f}".format(cls, single_acc))
-    print("average = {:.4f}".format(torch.mean(accs)))
+    for cls, pre_acc, post_acc in zip(classes, accs_pre_sync, accs_post_sync):
+        print("{}: pre sync = {:.4f}, after sync {:.4f}".format(cls, pre_acc, post_acc))
+    print("average pre sync = {:.4f}, average after sync = {:.4f}".format(torch.mean(accs_pre_sync), torch.mean(accs_post_sync)))
 
-    return accs, error_dist_dict
+    return accs_pre_sync, accs_post_sync, error_dist_dict
