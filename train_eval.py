@@ -1,5 +1,7 @@
 import math
 import torch
+import numpy as np
+import random
 import torch.optim as optim
 import torch.nn.functional as F
 import wandb
@@ -10,7 +12,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from torch.utils.data import DataLoader, Subset, DistributedSampler
 from sklearn.model_selection import train_test_split
-import numpy as np
 from scipy.optimize import linear_sum_assignment
 import time
 from pathlib import Path
@@ -67,7 +68,29 @@ class InfoNCE_Loss(torch.nn.Module):
        
         loss = loss_1 + loss_2 #(loss_1 + loss_2) / 2
         return loss + source_prot_score_mean + target_prot_score_mean #  sq_forb_norm 
+    
+class SoftNearestNeighborSimLoss(torch.nn.Module):
+    def __init__(self, temperature: float = 0.01, eps: float = 1e-8):
+        super().__init__()
+        self.tau = temperature
+        self.eps = eps
+    
+    def forward(self, S_block: torch.Tensor, labels: torch.Tensor):
+        M = S_block.size(0)
+        logits = S_block / self.tau
+        logits = logits - torch.eye(M, device=logits.device) * 1e9
 
+        mask_pos = labels.unsqueeze(1).eq(labels.unsqueeze(0))
+        mask_all = ~torch.eye(M, device=logits.device).bool()
+
+        exp_logits = logits.exp()
+        numer = (exp_logits * mask_pos.float()).sum(dim=1)
+        denom = (exp_logits * mask_all.float()).sum(dim=1)
+
+        loss = -torch.log((numer + self.eps) / (denom + self.eps))
+        return loss.mean()
+    
+    
 lr_schedules = {
     #TODO: CHANGE BACK TO 10
     "long_halving1": (32, (3, 8, 13, 20), 0.3),
@@ -130,7 +153,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         # assert resume
         if local_rank == output_rank:
             print(f"Evaluating without training...")
-            evaluation_epoch = 24
+            evaluation_epoch = 32
             accs_pre, accs_post, error_dict = eval.eval_model(model, dataloader["test"], local_rank, output_rank, eval_epoch=evaluation_epoch)
             all_error_dict[evaluation_epoch] = error_dict
             acc_dict = {
@@ -165,25 +188,15 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         if local_rank == output_rank:
             print("lr = " + ", ".join(["{:.2e}".format(x["lr"]) for x in optimizer.param_groups]))
 
-        epoch_loss_2 = 0
         epoch_loss = 0.0
-        running_loss = 0.0
-        running_acc = 0.0
         epoch_acc = 0.0
-        running_f1 = 0.0
         epoch_f1 = 0.0
         running_since = time.time()
-        
-        tp = 0
-        fp = 0
-        fn = 0
         
         epoch_correct = 0
         epoch_total_valid = 0
         
         for inputs in dataloader["train"]:
-            # all_classes = [_ for _ in inputs["cls"]]
-            # print(all_classes)
             data_list = [_.cuda() for _ in inputs["images"]]
             points_gt_list = [_.cuda() for _ in inputs["Ps"]]
             n_points_gt_list = [_.cuda() for _ in inputs["ns"]]
@@ -202,26 +215,32 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 eval_similarity_scores = similarity_scores.clone().detach()
                 batch_size = similarity_scores.shape[0]
                 
-                
-                for idx, e in enumerate(n_points_gt_sample):
-                    perm_mat_list[0][idx, e:, :] = 0
-                
-                has_one = perm_mat_list[0].sum(dim=2) != 0
-                expanded_mask = has_one.unsqueeze(-1).expand_as(perm_mat_list[0])
-                
-                similarity_scores_2 = similarity_scores.clone().transpose(-2, -1)
-                perm_mat_list_2 = perm_mat_list[0].clone().transpose(-2, -1)
-                
-                similarity_scores = similarity_scores.masked_select(expanded_mask).view(-1, perm_mat_list[0].size(2))
-                y_values = perm_mat_list[0].masked_select(expanded_mask).view(-1, perm_mat_list[0].size(2))
-                y_values_ = torch.argmax(y_values, dim=1)
-                
-                similarity_scores_2 = similarity_scores_2.masked_select(expanded_mask).view(-1, perm_mat_list_2.size(2))
-                y_values_2 = perm_mat_list_2.masked_select(expanded_mask).view(-1, perm_mat_list_2.size(2))
-                y_values_2 = torch.argmax(y_values_2, dim=1)
-                
-                loss = criterion(similarity_scores, y_values_, s_points, t_points, similarity_scores_2, y_values_2) #, prototype_score
-                loss = loss + layer_loss
+                S = similarity_scores            # [B, N_max, N_max]
+                P = perm_mat_list[0]             # [B, N_max, N_max]
+                batch_losses = []
+                for b in range(batch_size):
+                    ns = n_points_gt_list[0][b].item()
+                    nt = n_points_gt_list[1][b].item()   # if you also store second-list, else ns==nt
+
+                    # slice out padding
+                    S_pair = S[b, :ns, :nt]             # (ns, nt)
+                    P_pair = P[b, :ns, :nt]             # (ns, nt)
+
+                    # build block [ns+nt, ns+nt]
+                    M = ns + nt
+                    S_block = S_pair.new_zeros((M, M))
+                    S_block[:ns, ns:] = S_pair
+                    S_block[ns:, :ns] = S_pair.t()
+
+                    # labels: sources 0..ns-1, targets inherit source idx via argmax
+                    src_lbl = torch.arange(ns, device=S.device)
+                    tgt_lbl = P_pair.argmax(dim=1)      # length ns
+                    labels  = torch.cat([src_lbl, tgt_lbl], dim=0)  # (M,)
+
+                    batch_losses.append(criterion(S_block, labels))
+
+                loss_snn = torch.stack(batch_losses).mean()
+                loss = loss_snn + layer_loss
                 loss.backward()
                 
                 if max_norm > 0:
@@ -236,7 +255,6 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
             with torch.no_grad():
                 matchings = []
                 B, N_s, N_t = perm_mat_list[0].size()
-                
                 
                 eval_pred_points = 0
                 j_pred = 0
@@ -291,14 +309,14 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         epoch_loss = epoch_loss / dataset_size
         epoch_time = time.time() - running_since
         if local_rank == output_rank:
-            # wandb.log({"ep_loss": epoch_loss, "ep_acc": epoch_acc, "ep_f1": epoch_f1})
+            wandb.log({"ep_loss": epoch_loss, "ep_acc": epoch_acc, "ep_f1": epoch_f1})
             print(f'epoch loss: {epoch_loss}, epoch accuracy: {epoch_acc}')
             print(f'completed in {epoch_time:.2f}s ({epoch_time/60:.2f}m)')
         if (epoch+1) % cfg.STATISTIC_STEP == 0:
             if local_rank == output_rank:
                 accs_pre, accs_post, error_dict = eval.eval_model(model, dataloader["test"], local_rank, output_rank)
                 all_error_dict[epoch+1] = error_dict
-                # wandb.log({"ep_loss": epoch_loss, "ep_acc": epoch_acc, "ep_f1": epoch_f1, "mean test_acc": torch.mean(accs), "mean test_f1": torch.mean(f1_scores)})
+                wandb.log({"ep_loss": epoch_loss, "ep_acc": epoch_acc, "ep_f1": epoch_f1, "mean test_acc_pre_sync": torch.mean(accs_pre), "mean test_acc_post_sync": torch.mean(accs_post)})
         
         
         if cfg.save_checkpoint and local_rank == output_rank:
@@ -352,6 +370,10 @@ if __name__ == "__main__":
         )
 
     torch.manual_seed(cfg.RANDOM_SEED)
+    np.random.seed(cfg.RANDOM_SEED)
+    random.seed(cfg.RANDOM_SEED)
+    torch.cuda.manual_seed_all(cfg.RANDOM_SEED)
+    
     dataset_len = {"train": cfg.TRAIN.EPOCH_ITERS * cfg.BATCH_SIZE, "test": cfg.EVAL.SAMPLES * world_size} # 
     image_dataset = {
         x: GMDataset(cfg.DATASET_NAME, sets=x, length=dataset_len[x], obj_resize=(256, 256)) for x in ("train", "test")
@@ -375,7 +397,7 @@ if __name__ == "__main__":
     model = model.to(device)
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
-    criterion = InfoNCE_Loss(temperature=cfg.TRAIN.temperature)
+    criterion = SoftNearestNeighborSimLoss(temperature=cfg.TRAIN.temperature)
     backbone_params = list(model.module.node_layers.parameters()) + list(model.module.edge_layers.parameters())
 
     backbone_ids = [id(item) for item in backbone_params]

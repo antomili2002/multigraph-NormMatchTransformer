@@ -1,4 +1,5 @@
 import time
+import wandb
 from pathlib import Path
 import numpy as np
 import torch
@@ -113,10 +114,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
         ds.set_cls(cls)
         
         pre_acc_tot, post_acc_tot = 0.0, 0.0        # accurancy acc. before and after sync
-        #pre_dist_tot, post_dist_tot = 0.0, 0.0      # distance acc.
-        pair_cnt        = 0
         result_dict = {}
-        epoch_correct, epoch_total_valid = 0.0, 0.0 # epoch acc.
         bad_pre_tot, bad_post_tot = 0.0, 0.0        # inconsistent cycles acc.
         num_batches = 0
         
@@ -165,22 +163,24 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                 P_pred = hard_perm_from_sink(P_sink)
                 pred_perm_mats.append(P_pred)
 
-            perm_mats_masked, pred_mats_masked = [], []
+            #perm_mats_masked, pred_mats_masked = [], []
             # slice out invalid padding of perm_mats and pred_mats
+            # Accumulate correct vs valid counts for pre-sync
+            correct_pre, valid_pre = 0.0, 0.0
             for idx, (g_i, g_j) in enumerate(pairs):
-                n_i = n_points_gt[g_i]  # shape [B]
-                n_j = n_points_gt[g_j]  # shape [B]
+                n_i = n_points_gt[g_i]
+                n_j = n_points_gt[g_j]
                 for b in range(batch_num):
-                    ni = n_i[b].item()
-                    nj = n_j[b].item()
-                    # slice away all padded rows/cols
-                    P_pred_valid = pred_perm_mats[idx][b, :ni, :nj]      # [ni × nj]
-                    P_gt_valid = perm_mat_list[idx][b][:ni, :nj]
-                    pred_mats_masked.append(P_pred_valid)
-                    perm_mats_masked.append(P_gt_valid)
-            
-            acc_pre, _, _ = matching_accuracy_from_lists(pred_mats_masked, perm_mats_masked)
-            pre_acc_tot += acc_pre.item()
+                    ni, nj = n_i[b].item(), n_j[b].item()
+                    Pp = pred_perm_mats[idx][b, :ni, :nj]       # [ni×nj]
+                    Pg = perm_mat_list[idx][b, :ni, :nj]       # [ni×nj]
+                    # row-wise argmax → predict & gt indices
+                    pred_idx = Pp.argmax(dim=1, keepdim=True)  # [ni,1]
+                    gt_idx   = Pg.argmax(dim=1, keepdim=True)  # [ni,1]
+                    c, v = calculate_correct_and_valid(pred_idx, gt_idx)
+                    correct_pre += c
+                    valid_pre   += v
+            pre_acc_tot += (correct_pre / valid_pre)
             
             # permutation synchronization if K > 2
             N_s = pred_perm_mats[0].shape[1]  # assumes square permutations: [B, N_s, N_t]
@@ -199,37 +199,20 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                 bad_post_tot += count_inconsistent_cycles(P_post)
             num_batches += batch_num
             
-            sync_pred, sync_gt = [], []
+            correct_post, valid_post = 0.0, 0.0
             for idx, (i, j) in enumerate(pairs):
-                sync_pred.extend(tau[:, i, j])
-                sync_gt.extend (perm_mat_list[idx])
-            acc_post, _, _ = matching_accuracy_from_lists(sync_pred, sync_gt)   
-            post_acc_tot += acc_post.item()
-            
-            # distance before and after (masked)
-            #for idx, (i, j) in enumerate(pairs):
-            #    n_valid = n_points_gt[i]              # [B]
-            #    pre_dist  = perm_distance_masked(T_tensor[:,   i, j], perm_mat_list[idx], n_valid)
-            #    post_dist = perm_distance_masked(tau[:, i, j], perm_mat_list[idx], n_valid)
-
-            #    pre_dist_tot  += pre_dist.item()  * batch_num
-            #    post_dist_tot += post_dist.item() * batch_num
-            #    pair_cnt      += batch_num
-            
-           # ------------- per-batch row/col accuracy for logging --------- #
-            for idx, (i, j) in enumerate(pairs):
-                P_gt = perm_mat_list[idx]     # [B,n,n]
+                n_i = n_points_gt[i]
+                n_j = n_points_gt[j]
                 for b in range(batch_num):
-                    P_syn  = tau[b, i, j]
-                    if P_gt[b].sum() == 0:    # empty GT -> skip
-                        continue
-
-                    pred_idx = P_syn.argmax(dim=1).unsqueeze(0)
-                    gt_idx   = P_gt[b].argmax(dim=1).unsqueeze(0)
-                    corr, valid = calculate_correct_and_valid(pred_idx, gt_idx)
-                    epoch_correct     += corr
-                    epoch_total_valid += valid
-
+                    ni, nj = n_i[b].item(), n_j[b].item()
+                    Ps = tau[b, i, j][:ni, :nj]
+                    Pg = perm_mat_list[idx][b, :ni, :nj]
+                    pred_idx = Ps.argmax(dim=1, keepdim=True)
+                    gt_idx   = Pg.argmax(dim=1, keepdim=True)
+                    c, v = calculate_correct_and_valid(pred_idx, gt_idx)
+                    correct_post += c
+                    valid_post   += v
+                    
                     # ---------- per-keypoint error distribution ----------- #
                     n_pts = int(n_points_gt[i][b])
                     err_vec = (pred_idx[0, :n_pts] != gt_idx[0, :n_pts]).int()
@@ -237,15 +220,14 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                         result_dict[n_pts] = [0, torch.zeros(n_pts, device=device)]
                     result_dict[n_pts][0] += 1
                     result_dict[n_pts][1] += err_vec
+                    
+            post_acc_tot += (correct_post / valid_post)
             
             # progress print every 40 batches
             if iter_num % 40 == 0 and verbose: #cfg.STATISTIC_STEP
                 running_speed = 40 * batch_num / (time.time() - running_since) #cfg.STATISTIC_STEP
                 print("Class {:<8} Iteration {:<4} {:>4.2f}sample/s".format(cls, iter_num, running_speed))
                 running_since = time.time()
-        
-        #dist_b = pre_dist_tot  / pair_cnt
-        #dist_a = post_dist_tot / pair_cnt
         
         acc_pre_cls  = pre_acc_tot  / iter_num
         acc_post_cls = post_acc_tot / iter_num
@@ -259,7 +241,6 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
         # f1_scores[i] = epoch_f1
         if verbose:
             print(f"Class {cls} acc_pre_sync = {acc_pre_cls:.4f} acc_post_sync = {acc_post_cls:.4f}")
-            #print(f"Avg distance  : before={dist_b:.3f} | after={dist_a:.3f}")
             print(f"Avg inconsistent 3-cycles before sync: {avg_bad_pre:.2f}, after sync: {avg_bad_post:.2f}")
             
         error_dist_dict[cls] = result_dict
@@ -267,6 +248,23 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
     # print(error_dist_dict)
     time_elapsed = time.time() - since
     print("Evaluation complete in {:.0f}m {:.0f}s".format(time_elapsed // 60, time_elapsed % 60))
+
+    # wandb logging
+    avg_pre = torch.mean(accs_pre_sync).item()
+    avg_post = torch.mean(accs_post_sync).item()
+    
+    if local_rank == output_rank:
+        wandb.log({
+                "eval/avg_pre_sync":  avg_pre,
+                "eval/avg_post_sync": avg_post,
+                "eval/time_s":       time_elapsed
+        }, step=(eval_epoch or wandb.run.step))
+        # log per-class accuracies too
+        for cls, pre, post in zip(classes, accs_pre_sync, accs_post_sync):
+            wandb.log({
+                    f"eval/pre_sync/{cls}":  pre.item(),
+                    f"eval/post_sync/{cls}": post.item()
+            }, step=(eval_epoch or wandb.run.step))
 
     model.train(mode=was_training)
     ds.cls = cls_cache
