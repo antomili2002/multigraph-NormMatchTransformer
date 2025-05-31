@@ -23,7 +23,7 @@ from datetime import timedelta
 from sklearn.metrics import f1_score
 from data.data_loader_multigraph import GMDataset, get_dataloader
 import eval
-from model import MNMT, CycleContrastiveLoss, NMT
+from model import MNMT, NMT
 from utils.config import cfg
 from utils.utils import update_params_from_cmdline, compute_grad_norm
 from utils.evaluation_metric import calculate_correct_and_valid, calculate_f1_score, get_pos_neg, get_pos_neg_from_lists
@@ -75,20 +75,32 @@ class SoftNearestNeighborSimLoss(torch.nn.Module):
         self.tau = temperature
         self.eps = eps
     
-    def forward(self, S_block: torch.Tensor, labels: torch.Tensor):
-        M = S_block.size(0)
+    def forward(self, 
+                S_block: torch.Tensor,      # [B, M, M] 
+                labels: torch.Tensor,       # [B, M] int labels in [0, .., M-1) 
+                valid_mask: torch.Tensor    # [B, M] bool mask for valid keypoints
+                ):
+        B, M, _ = S_block.shape
+        device = S_block.device
+        
         logits = S_block / self.tau
-        logits = logits - torch.eye(M, device=logits.device) * 1e9
+        diag = torch.eye(M, device=device).unsqueeze(0)
+        logits = logits - diag * 1e9
 
-        mask_pos = labels.unsqueeze(1).eq(labels.unsqueeze(0))
-        mask_all = ~torch.eye(M, device=logits.device).bool()
+        mask_pos = labels.unsqueeze(2) == (labels.unsqueeze(1)) # same class mask [B, M, M]
+        mask_valid_pairs = valid_mask.unsqueeze(2) & valid_mask.unsqueeze(1) & ~torch.eye(M, device=logits.device).bool()
 
         exp_logits = logits.exp()
-        numer = (exp_logits * mask_pos.float()).sum(dim=1)
-        denom = (exp_logits * mask_all.float()).sum(dim=1)
+        numer = (exp_logits * mask_pos.float() * mask_valid_pairs.float()).sum(dim=2)
+        denom = (exp_logits * mask_valid_pairs.float()).sum(dim=2)
 
-        loss = -torch.log((numer + self.eps) / (denom + self.eps))
-        return loss.mean()
+        loss_i = -torch.log((numer + self.eps) / (denom + self.eps))                   # [B,M]
+
+        # average per sample only over valid i
+        loss_per_sample = (loss_i * valid_mask.float()).sum(dim=1) / valid_mask.sum(dim=1).float()      # [B]
+
+        # final mean over batch
+        return loss_per_sample.mean()
     
     
 lr_schedules = {
@@ -213,33 +225,36 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 # forward
                 similarity_scores, s_points, t_points, layer_loss = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
                 eval_similarity_scores = similarity_scores.clone().detach()
-                batch_size = similarity_scores.shape[0]
                 
-                S = similarity_scores            # [B, N_max, N_max]
-                P = perm_mat_list[0]             # [B, N_max, N_max]
-                batch_losses = []
+                batch_size, N_max, _ = similarity_scores.shape
+                
+                ns = n_points_gt_list[0]    # [B]
+                nt = n_points_gt_list[1]    # [B]
+                M = (ns + nt).max().item()   # maximum block size in this batch
+                
+                S_blocks   = similarity_scores.new_zeros((batch_size, M, M))
+                labels     = similarity_scores.new_full((batch_size, M), -1, dtype=torch.long)
+                valid_mask = torch.zeros((batch_size, M), dtype=torch.bool, device=similarity_scores.device)
+                
                 for b in range(batch_size):
-                    ns = n_points_gt_list[0][b].item()
-                    nt = n_points_gt_list[1][b].item()   # if you also store second-list, else ns==nt
+                    s, t = ns[b].item(), nt[b].item()
+                    # slice the real block
+                    S_pair = similarity_scores[b, :s, :t]   # [s,t]
+                    P_pair = perm_mat_list[0][b, :s, :t]    # [s,t]
 
-                    # slice out padding
-                    S_pair = S[b, :ns, :nt]             # (ns, nt)
-                    P_pair = P[b, :ns, :nt]             # (ns, nt)
+                    # build the 2×2 block into S_blocks[b]
+                    S_blocks[b, :s, s:s+t] = S_pair
+                    S_blocks[b, s:s+t, :s] = S_pair.t()
 
-                    # build block [ns+nt, ns+nt]
-                    M = ns + nt
-                    S_block = S_pair.new_zeros((M, M))
-                    S_block[:ns, ns:] = S_pair
-                    S_block[ns:, :ns] = S_pair.t()
+                    # labels: 0..s-1 for sources; P_pair.argmax→ 0..s-1 for targets
+                    src_lbl = torch.arange(s, device=S_blocks.device)
+                    tgt_lbl = P_pair.argmax(dim=1)         # length s
+                    labels[b, :s]     = src_lbl
+                    labels[b, s:s+t]  = tgt_lbl
 
-                    # labels: sources 0..ns-1, targets inherit source idx via argmax
-                    src_lbl = torch.arange(ns, device=S.device)
-                    tgt_lbl = P_pair.argmax(dim=1)      # length ns
-                    labels  = torch.cat([src_lbl, tgt_lbl], dim=0)  # (M,)
-
-                    batch_losses.append(criterion(S_block, labels))
-
-                loss_snn = torch.stack(batch_losses).mean()
+                    valid_mask[b, : (s + t)] = True
+                    
+                loss_snn = criterion(S_blocks, labels, valid_mask)
                 loss = loss_snn + layer_loss
                 loss.backward()
                 
@@ -253,11 +268,9 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 
                 
             with torch.no_grad():
-                matchings = []
                 B, N_s, N_t = perm_mat_list[0].size()
                 
                 eval_pred_points = 0
-                j_pred = 0
                 predictions_list = []
                 for i in range(B):
                     predictions_list.append([])

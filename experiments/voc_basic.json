@@ -46,7 +46,7 @@
   "visualization_params": {
     "reduced_vis": true
   },
-  "evaluate_only": false,
+  "evaluate_only": true,
   "model_dir": "./results/voc_basic/NMT",
   "log_dir": "runs/",
   "MODEL_ARCH": "NMT"

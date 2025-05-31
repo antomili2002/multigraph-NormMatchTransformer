@@ -68,11 +68,7 @@ def count_inconsistent_cycles(pairwise: torch.Tensor):
             for k in range(j+1, K):
                 # Compose P_ij * P_jk * P_ki
                 C = pairwise[i,j] @ pairwise[j,k] @ pairwise[k,i]
-                # how far from identity?
-                # If it were perfect, C would equal I exactly.
-                # Count any off-diagonal or missing diagonal entries:
                 deviation = torch.abs(C - torch.eye(n, device=C.device))
-                # If you want just a binary flag:
                 if (deviation > 1e-4).any():
                     total_bad += 1
     return total_bad
