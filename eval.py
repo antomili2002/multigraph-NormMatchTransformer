@@ -3,6 +3,7 @@ import wandb
 from pathlib import Path
 import numpy as np
 import torch
+import mgm_py
 import torch.nn.functional as F
 import torch.distributed as dist  # Add this import
 from scipy.optimize import linear_sum_assignment
@@ -96,7 +97,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
 
     accs_pre_sync = torch.zeros(len(classes), device=device)
     accs_post_sync = torch.zeros(len(classes), device=device)
-    #f1_scores = torch.zeros(len(classes), device=device)
+    
     error_dist_dict = {}
     pairs = list(combinations(range(K), 2))
     
@@ -109,9 +110,10 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
         iter_num = 0
         ds.set_cls(cls)
         
-        pre_acc_tot, post_acc_tot = 0.0, 0.0        # accurancy acc. before and after sync
+        sum_pre_acc = 0.0    # sum over batches of (correct_pre/valid_pre)
+        sum_post_acc = 0.0   # sum over batches of (correct_post/valid_post)
+        
         result_dict = {}
-        bad_pre_tot, bad_post_tot = 0.0, 0.0        # inconsistent cycles acc.
         num_batches = 0
         
         for k, inputs in enumerate(dataloader, 1):
@@ -123,7 +125,9 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
             perm_mat_list = [perm_mat.cuda() for perm_mat in inputs["gt_perm_mat"]]
 
             batch_num = data_list[0].size(0)    # batch size
+            
             pred_perm_mats = []                 # pairewise prediction
+            sim_matrices = []
             
             for idx, (g_i,g_j) in enumerate(pairs):     # pairewise inference loop
                 imgs_pair  = [data_list[g_i], data_list[g_j]]
@@ -143,23 +147,12 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                         in_training       = False,
                     )
                 
-                P_sink = sinkhorn_logspace(sim) # [B, Ni, Nj]
-                N_s, N_t = P_sink.size(1), P_sink.size(2)
+                sim_matrices.append(sim)    # [B, Ni, Nj]
                 
-                # Row-wise argmax
-                #sink_max = torch.argmax(P_sink, dim=-1)  # [B, N_s]
-
-                # Baue harte Permutationsmatrix per Batch
-                #P_pred = torch.zeros(batch_num, N_s, N_t, device=device)
-                #for b in range(batch_num):
-                #    for src in range(N_s):
-                #        if src < n_points_gt[g_i][b]:
-                #            tgt = sink_max[b, src].item()
-                #            P_pred[b, src, tgt] = 1
+                P_sink = sinkhorn_logspace(sim) # [B, Ni, Nj]
                 P_pred = hard_perm_from_sink(P_sink)
                 pred_perm_mats.append(P_pred)
 
-            #perm_mats_masked, pred_mats_masked = [], []
             # slice out invalid padding of perm_mats and pred_mats
             # Accumulate correct vs valid counts for pre-sync
             correct_pre, valid_pre = 0.0, 0.0
@@ -176,48 +169,71 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                     c, v = calculate_correct_and_valid(pred_idx, gt_idx)
                     correct_pre += c
                     valid_pre   += v
-            pre_acc_tot += (correct_pre / valid_pre)
+            pre_acc_batch = (correct_pre / valid_pre)
+            sum_pre_acc += pre_acc_batch
             
-            # permutation synchronization if K > 2
-            N_s = pred_perm_mats[0].shape[1]  # assumes square permutations: [B, N_s, N_t]
-            T_tensor = torch.eye(N_s, device=device).repeat(batch_num, K, K, 1, 1)
-            for idx, (i, j) in enumerate(pairs):
-                T_tensor[:, i, j] = pred_perm_mats[idx]
-                T_tensor[:, j, i] = pred_perm_mats[idx].transpose(1, 2)
-                
-            tau = perm_sync_batched(T_tensor) if K > 2 else T_tensor
+            correct_post = 0.0
+            valid_post   = 0.0
             
-            # calculation of inconsistent cycles
             for b in range(batch_num):
-                P_pre = T_tensor[b]
-                P_post = tau[b]
-                bad_pre_tot  += count_inconsistent_cycles(P_pre)
-                bad_post_tot += count_inconsistent_cycles(P_post)
-            num_batches += batch_num
+                graph_sizes_b = [n_points_gt[g][b].item() for g in range(K)] # graph-sizes for this example
+                sim_list_b = []
+                for idx, (i, j) in enumerate(pairs):
+                    ni, nj = graph_sizes_b[i], graph_sizes_b[j]
+                    mat_b_full = sim_matrices[idx][b]
+                    mat_b = mat_b_full[:ni, :nj].detach().cpu().numpy()
+                    sim_list_b.append(mat_b.astype(np.float64))
+                
+                mgm_py.set_log_level("off") # set log level of mgm model
+                # build and run mgm model
+                mgm_model_b = mgm_py.build_mgm_model_from_similarity_tensors(
+                    sim_list_b,
+                    graph_sizes_b
+                )
+                # solve it with MGM:
+                sol_b = mgm_py.run_mgm_model(
+                    mgm_model_b,
+                    mode="optimal",
+                    incremental_set_size=0,
+                    merge_one=False,
+                    nr_threads=1,
+                    libmpopt_seed=12345
+                )
+                # extract all pairwise 0/1 matches for this example:
+                all_matches_b = mgm_py.export_all_match_matrices(sol_b)
             
-            correct_post, valid_post = 0.0, 0.0
-            for idx, (i, j) in enumerate(pairs):
-                n_i = n_points_gt[i]
-                n_j = n_points_gt[j]
-                for b in range(batch_num):
-                    ni, nj = n_i[b].item(), n_j[b].item()
-                    Ps = tau[b, i, j][:ni, :nj]
+                # accumulate post-sync just like pre-sync
+                for idx, (g_i, g_j) in enumerate(pairs):
+                    ni, nj = graph_sizes_b[g_i], graph_sizes_b[g_j]
+                    
+                    Ps = all_matches_b[idx]
                     Pg = perm_mat_list[idx][b, :ni, :nj]
-                    pred_idx = Ps.argmax(dim=1, keepdim=True)
+                    P_post = torch.from_numpy(Ps).to(device)
+                    
+                    pred_idx = P_post.argmax(dim=1, keepdim=True)
                     gt_idx   = Pg.argmax(dim=1, keepdim=True)
                     c, v = calculate_correct_and_valid(pred_idx, gt_idx)
                     correct_post += c
-                    valid_post   += v
-                    
-                    # ---------- per-keypoint error distribution ----------- #
-                    n_pts = int(n_points_gt[i][b])
-                    err_vec = (pred_idx[0, :n_pts] != gt_idx[0, :n_pts]).int()
+                    valid_post += v
+            
+                for idx, (g_i, g_j) in enumerate(pairs):
+                    ni = graph_sizes_b[g_i]
+                    # for each row u in [0..ni), compare predicted v* vs. gt v
+                    Ppost_np = all_matches_b[idx]  # shape (ni, nj)
+                    pred_idx = torch.from_numpy(Ppost_np.argmax(axis=1).reshape(ni, 1)).to(device)
+                    Pg = perm_mat_list[idx][b, :ni, :nj]
+                    gt_idx = Pg.argmax(dim=1, keepdim=True)  # [ni,1]
+
+                    err_vec = (pred_idx.squeeze(1) != gt_idx.squeeze(1)).int()
+                    n_pts = ni
                     if n_pts not in result_dict:
-                        result_dict[n_pts] = [0, torch.zeros(n_pts, device=device)]
+                        result_dict[n_pts] = [0, torch.zeros(n_pts, device=device, dtype=torch.int32)]
                     result_dict[n_pts][0] += 1
                     result_dict[n_pts][1] += err_vec
-                    
-            post_acc_tot += (correct_post / valid_post)
+            
+            num_batches += 1
+            post_acc_batch = (correct_post / valid_post)
+            sum_post_acc += post_acc_batch
             
             # progress print every 40 batches
             if iter_num % 40 == 0 and verbose: #cfg.STATISTIC_STEP
@@ -225,19 +241,16 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                 print("Class {:<8} Iteration {:<4} {:>4.2f}sample/s".format(cls, iter_num, running_speed))
                 running_since = time.time()
         
-        acc_pre_cls  = pre_acc_tot  / iter_num
-        acc_post_cls = post_acc_tot / iter_num
+        acc_pre_cls  = sum_pre_acc  / iter_num
+        acc_post_cls = sum_post_acc / iter_num
         
         accs_pre_sync[cls_inx] = acc_pre_cls
         accs_post_sync[cls_inx] = acc_post_cls
         
-        avg_bad_pre = bad_pre_tot / num_batches
-        avg_bad_post = bad_post_tot / num_batches
-        
         # f1_scores[i] = epoch_f1
         if verbose:
-            print(f"Class {cls} acc_pre_sync = {acc_pre_cls:.4f} acc_post_sync = {acc_post_cls:.4f}")
-            print(f"Avg inconsistent 3-cycles before sync: {avg_bad_pre:.2f}, after sync: {avg_bad_post:.2f}")
+            print(f"Class {cls} acc_pre_sync = {acc_pre_cls:.4f}, acc_post_sync = {acc_post_cls:.4f}")
+            #print(f"Avg inconsistent 3-cycles before sync: {avg_bad_pre:.2f}, after sync: {avg_bad_post:.2f}")
             
         error_dist_dict[cls] = result_dict
         

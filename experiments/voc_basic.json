@@ -4,7 +4,7 @@
   "exclude_willow_classes": false,
   "EVAL": {
     "SAMPLES": 1000,
-    "num_graphs_in_matching_instance": 4
+    "num_graphs_in_matching_instance": 3
   },
   "SPLINE_CNN": {
     "input_features": 1024,
