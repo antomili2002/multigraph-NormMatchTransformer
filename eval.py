@@ -57,23 +57,6 @@ def hard_perm_from_sink(P_sink: torch.Tensor) -> torch.Tensor:
         P_pred[b, r, c] = 1
     return P_pred.to(P_sink.device)
 
-def count_inconsistent_cycles(pairwise: torch.Tensor):
-    """
-    pairwise: Tensor of shape (K, K, n, n) giving P_{ij} for one batch item.
-    Returns total number of inconsistent triples (i<j<k).
-    """
-    K, _, n, _ = pairwise.shape
-    total_bad = 0
-    for i in range(K):
-        for j in range(i+1, K):
-            for k in range(j+1, K):
-                # Compose P_ij * P_jk * P_ki
-                C = pairwise[i,j] @ pairwise[j,k] @ pairwise[k,i]
-                deviation = torch.abs(C - torch.eye(n, device=C.device))
-                if (deviation > 1e-4).any():
-                    total_bad += 1
-    return total_bad
-
 def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verbose=True):
     print("Start evaluation...")
     since = time.time()
@@ -188,7 +171,8 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                 # build and run mgm model
                 mgm_model_b = mgm_py.build_mgm_model_from_similarity_tensors(
                     sim_list_b,
-                    graph_sizes_b
+                    graph_sizes_b,
+                    func = "logit"
                 )
                 # solve it with MGM:
                 sol_b = mgm_py.run_mgm_model(
@@ -199,9 +183,10 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                     nr_threads=1,
                     libmpopt_seed=12345
                 )
+                
                 # extract all pairwise 0/1 matches for this example:
                 all_matches_b = mgm_py.export_all_match_matrices(sol_b)
-            
+                
                 # accumulate post-sync just like pre-sync
                 for idx, (g_i, g_j) in enumerate(pairs):
                     ni, nj = graph_sizes_b[g_i], graph_sizes_b[g_j]
@@ -218,7 +203,6 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
             
                 for idx, (g_i, g_j) in enumerate(pairs):
                     ni = graph_sizes_b[g_i]
-                    # for each row u in [0..ni), compare predicted v* vs. gt v
                     Ppost_np = all_matches_b[idx]  # shape (ni, nj)
                     pred_idx = torch.from_numpy(Ppost_np.argmax(axis=1).reshape(ni, 1)).to(device)
                     Pg = perm_mat_list[idx][b, :ni, :nj]

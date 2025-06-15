@@ -70,7 +70,7 @@ class InfoNCE_Loss(torch.nn.Module):
         return loss + source_prot_score_mean + target_prot_score_mean #  sq_forb_norm 
     
 class SoftNearestNeighborSimLoss(torch.nn.Module):
-    def __init__(self, temperature: float = 0.01, eps: float = 1e-8):
+    def __init__(self, temperature: float = 0.1, eps: float = 1e-8):
         super().__init__()
         self.tau = temperature
         self.eps = eps
@@ -78,10 +78,29 @@ class SoftNearestNeighborSimLoss(torch.nn.Module):
     def forward(self, 
                 S_block: torch.Tensor,      # [B, M, M] 
                 labels: torch.Tensor,       # [B, M] int labels in [0, .., M-1) 
-                valid_mask: torch.Tensor    # [B, M] bool mask for valid keypoints
+                valid_mask: torch.Tensor,    # [B, M] bool mask for valid keypoints
+                points_embedding: list
                 ):
         B, M, _ = S_block.shape
         device = S_block.device
+        
+        # hyperspherical loss
+        hyperspherical_loss = 0.0
+        for points in points_embedding:
+            sim_number = torch.bmm(points, points.transpose(1, 2))
+            sim_normed1 = torch.norm(points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(2)
+            sim_normed2 = torch.norm(points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(1)
+            sim_denominator = torch.bmm(sim_normed1, sim_normed2)
+            cosine_sim_ = sim_number / sim_denominator
+            
+            ident_mat = torch.eye(cosine_sim_.shape[1]).to(device)
+            cosine_sim_ = cosine_sim_ - 2 * ident_mat
+            
+            prot_score_max, _ = torch.max(cosine_sim_, dim=-1)
+            prot_score_mean = torch.mean(prot_score_max, dim=-1)
+            prot_score_mean = torch.mean(prot_score_mean)
+            hyperspherical_loss += prot_score_mean
+        hyperspherical_loss = hyperspherical_loss / len(points_embedding)
         
         logits = S_block / self.tau
         diag = torch.eye(M, device=device).unsqueeze(0)
@@ -94,13 +113,58 @@ class SoftNearestNeighborSimLoss(torch.nn.Module):
         numer = (exp_logits * mask_pos.float() * mask_valid_pairs.float()).sum(dim=2)
         denom = (exp_logits * mask_valid_pairs.float()).sum(dim=2)
 
-        loss_i = -torch.log((numer + self.eps) / (denom + self.eps))                   # [B,M]
+        loss_i = torch.log((numer + self.eps) / (denom + self.eps))                   # [B,M]
 
         # average per sample only over valid i
         loss_per_sample = (loss_i * valid_mask.float()).sum(dim=1) / valid_mask.sum(dim=1).float()      # [B]
 
         # final mean over batch
-        return loss_per_sample.mean()
+        return -loss_per_sample.mean() + hyperspherical_loss
+    
+class GenericInfoNCELoss(torch.nn.Module):
+    def __init__(self, temperature: float = 0.1, eps: float = 1e-8):
+        super().__init__()
+        self.tau = temperature
+        self.eps = eps
+        
+    def forward(self, 
+                S_block: torch.Tensor,      # [B, M, M] 
+                labels: torch.Tensor,       # [B, M] int labels in [0, .., M-1) 
+                valid_mask: torch.Tensor,    # [B, M] bool mask for valid keypoints
+                points_embedding: list) -> torch.Tensor:
+        
+        B, M, _ = S_block.shape
+        device = S_block.device
+        
+        # hyperspherical loss
+        hyperspherical_loss = 0.0
+        for points in points_embedding:
+            sim_number = torch.bmm(points, points.transpose(1, 2))
+            sim_normed1 = torch.norm(points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(2)
+            sim_normed2 = torch.norm(points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(1)
+            sim_denominator = torch.bmm(sim_normed1, sim_normed2)
+            cosine_sim_ = sim_number / sim_denominator
+            
+            ident_mat = torch.eye(cosine_sim_.shape[1]).to(device)
+            cosine_sim_ = cosine_sim_ - 2 * ident_mat
+            
+            prot_score_max, _ = torch.max(cosine_sim_, dim=-1)
+            prot_score_mean = torch.mean(prot_score_max, dim=-1)
+            prot_score_mean = torch.mean(prot_score_mean)
+            hyperspherical_loss += prot_score_mean
+        hyperspherical_loss = hyperspherical_loss / len(points_embedding)
+        
+        logits = S_block / self.tau
+        logits = logits.view(B*M, M)
+        
+        targets = labels.view(B*M)
+        
+        loss_nce = F.cross_entropy(
+            logits,
+            targets,
+            ignore_index=-1
+        )
+        return loss_nce + hyperspherical_loss
     
     
 lr_schedules = {
@@ -254,7 +318,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
 
                     valid_mask[b, : (s + t)] = True
                     
-                loss_snn = criterion(S_blocks, labels, valid_mask)
+                loss_snn = criterion(S_blocks, labels, valid_mask, [s_points, t_points])
                 loss = loss_snn + layer_loss
                 loss.backward()
                 
@@ -265,8 +329,13 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                         
                 optimizer.step()
                 model.module.enforce_constraints()
-                
-                
+            
+            print_interval = 50
+            
+            if iter_num % print_interval == 0:
+                    print(f"[Epoch {epoch}][Iter {iter_num}] "
+                          f"loss: {loss.item():.4f}")
+                          
             with torch.no_grad():
                 B, N_s, N_t = perm_mat_list[0].size()
                 
@@ -322,14 +391,14 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         epoch_loss = epoch_loss / dataset_size
         epoch_time = time.time() - running_since
         if local_rank == output_rank:
-            wandb.log({"ep_loss": epoch_loss, "ep_acc": epoch_acc, "ep_f1": epoch_f1})
+            wandb.log({"ep_loss": epoch_loss, "ep_acc": epoch_acc})
             print(f'epoch loss: {epoch_loss}, epoch accuracy: {epoch_acc}')
             print(f'completed in {epoch_time:.2f}s ({epoch_time/60:.2f}m)')
         if (epoch+1) % cfg.STATISTIC_STEP == 0:
             if local_rank == output_rank:
                 accs_pre, accs_post, error_dict = eval.eval_model(model, dataloader["test"], local_rank, output_rank)
                 all_error_dict[epoch+1] = error_dict
-                wandb.log({"ep_loss": epoch_loss, "ep_acc": epoch_acc, "ep_f1": epoch_f1, "mean test_acc_pre_sync": torch.mean(accs_pre), "mean test_acc_post_sync": torch.mean(accs_post)})
+                wandb.log({"ep_loss": epoch_loss, "ep_acc": epoch_acc, "mean test_acc_pre_sync": torch.mean(accs_pre), "mean test_acc_post_sync": torch.mean(accs_post)})
         
         
         if cfg.save_checkpoint and local_rank == output_rank:
