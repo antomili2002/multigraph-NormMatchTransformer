@@ -128,13 +128,11 @@ class GenericInfoNCELoss(torch.nn.Module):
         self.eps = eps
         
     def forward(self, 
-                S_block: torch.Tensor,      # [B, M, M] 
-                labels: torch.Tensor,       # [B, M] int labels in [0, .., M-1) 
-                valid_mask: torch.Tensor,    # [B, M] bool mask for valid keypoints
+                sim_list: list,      
+                perm_list: list,       # [B, M, M]
                 points_embedding: list) -> torch.Tensor:
         
-        B, M, _ = S_block.shape
-        device = S_block.device
+        device = sim_list[0].device
         
         # hyperspherical loss
         hyperspherical_loss = 0.0
@@ -154,16 +152,35 @@ class GenericInfoNCELoss(torch.nn.Module):
             hyperspherical_loss += prot_score_mean
         hyperspherical_loss = hyperspherical_loss / len(points_embedding)
         
-        logits = S_block / self.tau
-        logits = logits.view(B*M, M)
+        total_loss = 0.0
+        pair_count = 0
+        for S_ij, P_ij in zip(sim_list, perm_list):
+            B, N_i, Nj = S_ij.shape
+            
+            has_one = P_ij.sum(dim=2) != 0
+            expanded_mask = has_one.unsqueeze(-1).expand_as(P_ij)
+            
+            S_ij_2 = S_ij.clone().transpose(-2, -1)
+            P_ij_2 = P_ij.clone().transpose(-2, -1)
+            
+            S_ij = S_ij.masked_select(expanded_mask).view(-1, P_ij.size(2))
+            y_values = P_ij.masked_select(expanded_mask).view(-1, P_ij.size(2))
+            pos_indices = torch.argmax(y_values, dim=1)
+            
+            S_ij_2 = S_ij_2.masked_select(expanded_mask).view(-1, P_ij_2.size(2))
+            y_values_2 = P_ij_2.masked_select(expanded_mask).view(-1, P_ij_2.size(2))
+            pos_indices_2 = torch.argmax(y_values_2, dim=1)
+            
+            logits = S_ij / self.tau
+            loss_1 = F.cross_entropy(logits, pos_indices)
+            
+            logits_2 = S_ij_2 / self.tau
+            loss_2 = F.cross_entropy(logits_2, pos_indices_2)
+            
+            total_loss += loss_1 + loss_2
+            pair_count += 1
         
-        targets = labels.view(B*M)
-        
-        loss_nce = F.cross_entropy(
-            logits,
-            targets,
-            ignore_index=-1
-        )
+        loss_nce = total_loss / pair_count
         return loss_nce + hyperspherical_loss
     
     
@@ -202,7 +219,10 @@ def swap_permutation_matrix(perm_mat_list, i):
 
 def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epochs, local_rank, output_rank, resume=False, start_epoch=0):
     since = time.time()
-    dataloader["train"].dataset.set_num_graphs(cfg.TRAIN.num_graphs_in_matching_instance)
+    
+    K = cfg.TRAIN.num_graphs_in_matching_instance
+    dataloader["train"].dataset.set_num_graphs(K)
+    
     dataset_size = len(dataloader["train"].dataset)
     all_error_dict = {}
 
@@ -289,37 +309,21 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 # forward
                 similarity_scores, s_points, t_points, layer_loss = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
                 eval_similarity_scores = similarity_scores.clone().detach()
+                sim_list = [similarity_scores]
+                batch_size = similarity_scores.shape[0]
+                point_embeddings = [s_points, t_points]
                 
-                batch_size, N_max, _ = similarity_scores.shape
+                idx = 0
+                for i in range(K):
+                    ni = n_points_gt_list[i]   # [B]
+                    for j in range(i+1, K):
+                        Pij = perm_mat_list[idx]    # [B, Mi, Mj]
+                        for b, e in enumerate(ni):
+                            Pij[b, e:, :] = 0
+                        idx += 1
                 
-                ns = n_points_gt_list[0]    # [B]
-                nt = n_points_gt_list[1]    # [B]
-                M = (ns + nt).max().item()   # maximum block size in this batch
-                
-                S_blocks   = similarity_scores.new_zeros((batch_size, M, M))
-                labels     = similarity_scores.new_full((batch_size, M), -1, dtype=torch.long)
-                valid_mask = torch.zeros((batch_size, M), dtype=torch.bool, device=similarity_scores.device)
-                
-                for b in range(batch_size):
-                    s, t = ns[b].item(), nt[b].item()
-                    # slice the real block
-                    S_pair = similarity_scores[b, :s, :t]   # [s,t]
-                    P_pair = perm_mat_list[0][b, :s, :t]    # [s,t]
-
-                    # build the 2×2 block into S_blocks[b]
-                    S_blocks[b, :s, s:s+t] = S_pair
-                    S_blocks[b, s:s+t, :s] = S_pair.t()
-
-                    # labels: 0..s-1 for sources; P_pair.argmax→ 0..s-1 for targets
-                    src_lbl = torch.arange(s, device=S_blocks.device)
-                    tgt_lbl = P_pair.argmax(dim=1)         # length s
-                    labels[b, :s]     = src_lbl
-                    labels[b, s:s+t]  = tgt_lbl
-
-                    valid_mask[b, : (s + t)] = True
-                    
-                loss_snn = criterion(S_blocks, labels, valid_mask, [s_points, t_points])
-                loss = loss_snn + layer_loss
+                loss = criterion(sim_list, perm_mat_list, point_embeddings) #, prototype_score
+                loss = loss + layer_loss
                 loss.backward()
                 
                 if max_norm > 0:
@@ -479,7 +483,7 @@ if __name__ == "__main__":
     model = model.to(device)
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
-    criterion = SoftNearestNeighborSimLoss(temperature=cfg.TRAIN.temperature)
+    criterion = GenericInfoNCELoss(temperature=cfg.TRAIN.temperature)
     backbone_params = list(model.module.node_layers.parameters()) + list(model.module.edge_layers.parameters())
 
     backbone_ids = [id(item) for item in backbone_params]
