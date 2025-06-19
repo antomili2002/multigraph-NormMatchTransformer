@@ -1,9 +1,13 @@
 import time
+import pylibmgm.solver
 import wandb
 from pathlib import Path
 import numpy as np
 import torch
 import mgm_py
+import math
+import pylibmgm
+import logging
 import torch.nn.functional as F
 import torch.distributed as dist  # Add this import
 from scipy.optimize import linear_sum_assignment
@@ -56,6 +60,72 @@ def hard_perm_from_sink(P_sink: torch.Tensor) -> torch.Tensor:
         r, c = linear_sum_assignment(cost[b])
         P_pred[b, r, c] = 1
     return P_pred.to(P_sink.device)
+
+def mgm_model_synchronizing(
+    sim_matrices,       # List[torch.Tensor], length C = K*(K-1)/2, each [B, Ni_max, Nj_max]
+    n_points_gt_list,   # List[torch.Tensor], length K, each [B]
+    pairs,              # List of (i,j) in lex order
+    batch_idx,          # index of batch
+    parallel=False,     # whether to use solve_mgm_parallel
+    sync=False,         # whether to post-sync
+    func = "logit"      # function for the unary costs
+    ):
+    
+    K = len(n_points_gt_list)
+    device = sim_matrices[0].device
+    
+    mgm_model = pylibmgm.MgmModel()
+    
+    for idx,(i,j) in enumerate(pairs):
+        Si = sim_matrices[idx][batch_idx]             # [Ni_max, Nj_max]
+        ni = int(n_points_gt_list[i][batch_idx].item())
+        nj = int(n_points_gt_list[j][batch_idx].item())
+        mat = Si[:ni,:nj].detach().cpu().numpy()
+
+        # reserve exactly ni*nj unary costs, no quadratics
+        gm = pylibmgm.GmModel(pylibmgm.Graph(i, ni), pylibmgm.Graph(j, nj), ni*nj, 0)
+
+        # fill in unary costs with function
+        eps = 1e-8
+        for u in range(ni):
+            for v in range(nj):
+                s = float(mat[u,v])
+                
+                # clamp to avoid + /- 1
+                if func in ("atanh", "logit"):
+                    s = max(-1+eps, min(1-eps, s))
+                if func == "logit":
+                    cost = float(-math.log((1+s)/(1-s)))
+                elif func == "atanh":
+                    cost = float(-math.atanh(s))
+                else:  # "cosine"
+                    cost = float(-s)
+                    
+                gm.add_assignment(u, v, cost)
+
+        mgm_model.add_model(gm)
+    
+    if parallel: # does not work because of std::out_of_range
+        sol = pylibmgm.solver.solve_mgm_parallel(mgm_model, opt_level=pylibmgm.solver.OptimizationLevel.DEFAULT, nr_threads=4)
+    else:
+        sol = pylibmgm.solver.solve_mgm(mgm_model, opt_level=pylibmgm.solver.OptimizationLevel.DEFAULT)
+
+    if sync:
+        sol = pylibmgm.solver.synchronize_solution(mgm_model, sol, feasible=True, iterations=3, opt_level=pylibmgm.solver.OptimizationLevel.DEFAULT)
+    
+    out = []
+    for (i, j) in pairs:
+        labels = sol[(i, j)]          # pylibmgm returns a GmSolution via __getitem__
+        #lab   = gmsol.labeling     
+        ni    = int(n_points_gt_list[i][batch_idx].item())
+        nj    = int(n_points_gt_list[j][batch_idx].item())
+        mat_ij = np.zeros((ni, nj), dtype=np.int32)
+        for u, v in enumerate(labels):
+            if 0 <= v < nj:
+                mat_ij[u, v] = 1
+        out.append((i, j, mat_ij))
+    
+    return out
 
 def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verbose=True):
     print("Start evaluation...")
@@ -157,7 +227,6 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
             
             correct_post = 0.0
             valid_post   = 0.0
-            
             for b in range(batch_num):
                 graph_sizes_b = [n_points_gt[g][b].item() for g in range(K)] # graph-sizes for this example
                 sim_list_b = []
@@ -167,33 +236,27 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                     mat_b = mat_b_full[:ni, :nj].detach().cpu().numpy()
                     sim_list_b.append(mat_b.astype(np.float64))
                 
-                mgm_py.set_log_level("off") # set log level of mgm model
-                # build and run mgm model
-                mgm_model_b = mgm_py.build_mgm_model_from_similarity_tensors(
-                    sim_list_b,
-                    graph_sizes_b,
-                    func = "logit"
-                )
-                # solve it with MGM:
-                sol_b = mgm_py.run_mgm_model(
-                    mgm_model_b,
-                    mode="optimal",
-                    incremental_set_size=0,
-                    merge_one=False,
-                    nr_threads=1,
-                    libmpopt_seed=12345
-                )
+                logger = logging.getLogger("libmgm")
+                logger.setLevel(logging.WARNING) # set log level of mgm model
                 
-                # extract all pairwise 0/1 matches for this example:
-                all_matches_b = mgm_py.export_all_match_matrices(sol_b)
+                # create MgmModel, solve mgm and extract labelings
+                all_matches_b = mgm_model_synchronizing(
+                    sim_matrices     = sim_matrices,
+                    n_points_gt_list = n_points_gt,
+                    pairs            = pairs,
+                    batch_idx        = b,
+                    parallel         = False,     
+                    sync             = True,     
+                    func             = "logit"
+                )
                 
                 # accumulate post-sync just like pre-sync
                 for idx, (g_i, g_j) in enumerate(pairs):
                     ni, nj = graph_sizes_b[g_i], graph_sizes_b[g_j]
                     
-                    Ps = all_matches_b[idx]
+                    _, _, Ps = all_matches_b[idx]
                     Pg = perm_mat_list[idx][b, :ni, :nj]
-                    P_post = torch.from_numpy(Ps).to(device)
+                    P_post = torch.Tensor(Ps).to(device)
                     
                     pred_idx = P_post.argmax(dim=1, keepdim=True)
                     gt_idx   = Pg.argmax(dim=1, keepdim=True)
@@ -203,8 +266,8 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
             
                 for idx, (g_i, g_j) in enumerate(pairs):
                     ni = graph_sizes_b[g_i]
-                    Ppost_np = all_matches_b[idx]  # shape (ni, nj)
-                    pred_idx = torch.from_numpy(Ppost_np.argmax(axis=1).reshape(ni, 1)).to(device)
+                    _, _, Ppost_np = all_matches_b[idx]  # shape (ni, nj)
+                    pred_idx = torch.Tensor(Ppost_np.argmax(axis=1).reshape(ni, 1)).to(device)
                     Pg = perm_mat_list[idx][b, :ni, :nj]
                     gt_idx = Pg.argmax(dim=1, keepdim=True)  # [ni,1]
 
