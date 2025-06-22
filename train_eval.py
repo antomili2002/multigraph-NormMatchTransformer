@@ -122,10 +122,11 @@ class SoftNearestNeighborSimLoss(torch.nn.Module):
         return -loss_per_sample.mean() + hyperspherical_loss
     
 class GenericInfoNCELoss(torch.nn.Module):
-    def __init__(self, temperature: float = 0.1, eps: float = 1e-8):
+    def __init__(self, temperature: float = 0.1, margin: float = 1.0, eps: float = 1e-8):
         super().__init__()
         self.tau = temperature
         self.eps = eps
+        self.m = margin
         
     def forward(self, 
                 sim_list: list,      
@@ -172,9 +173,20 @@ class GenericInfoNCELoss(torch.nn.Module):
             pos_indices_2 = torch.argmax(y_values_2, dim=1)
             
             logits = S_ij / self.tau
+            
+            # add cost margin like in BBGM Section 3.3
+            rows = torch.arange(logits.size(0), device=logits.device)
+            logits[rows, pos_indices] -= self.m
+            
             loss_1 = F.cross_entropy(logits, pos_indices)
             
+            
             logits_2 = S_ij_2 / self.tau
+            
+            # add cost margin like in BBGM Section 3.3
+            rows_2 = torch.arange(logits_2.size(0), device=logits_2.device)
+            logits_2[rows_2, pos_indices_2] -= self.m
+            
             loss_2 = F.cross_entropy(logits_2, pos_indices_2)
             
             total_loss += loss_1 + loss_2
@@ -249,7 +261,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         # assert resume
         if local_rank == output_rank:
             print(f"Evaluating without training...")
-            evaluation_epoch = 32
+            evaluation_epoch = 30
             accs_pre, accs_post, error_dict = eval.eval_model(model, dataloader["test"], local_rank, output_rank, eval_epoch=evaluation_epoch)
             all_error_dict[evaluation_epoch] = error_dict
             acc_dict = {
@@ -483,7 +495,7 @@ if __name__ == "__main__":
     model = model.to(device)
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
-    criterion = GenericInfoNCELoss(temperature=cfg.TRAIN.temperature)
+    criterion = GenericInfoNCELoss(temperature=cfg.TRAIN.temperature, margin = cfg.TRAIN.margin)
     backbone_params = list(model.module.node_layers.parameters()) + list(model.module.edge_layers.parameters())
 
     backbone_ids = [id(item) for item in backbone_params]

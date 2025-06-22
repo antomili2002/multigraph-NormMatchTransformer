@@ -107,9 +107,13 @@ class NMT(utils.backbone.VGG16_bn):
         self.n_gpt_decoder = NGPT_DECODER(nGPT_decoder_config)
         self.n_gpt_decoder_2 = NGPT_DECODER(nGPT_decoder_config)
         
-        self.w_cosine = PairwiseCosineSimilarity(cfg.Matching_TF.d_model)
-        
         self.global_state_dim = 1024
+        self.d_hidden = 256
+        
+        # alpha for gated costs
+        self.gatedMLP = MLP(cfg.Matching_TF.d_model, self.d_hidden, cfg.Matching_TF.d_model)
+        
+        self.w_cosine = PairwiseCosineSimilarity(cfg.Matching_TF.d_model)
         
     
     def normalize_linear(self, module):
@@ -180,6 +184,7 @@ class NMT(utils.backbone.VGG16_bn):
         orig_graph_list = []
         # for visualisation purposes only
         graph_list = []
+        global_feats = []
         for image, p, n_p, graph in zip(images, points, n_points, graphs):
             # extract feature
             # with torch.no_grad():
@@ -215,6 +220,8 @@ class NMT(utils.backbone.VGG16_bn):
             global_feature = self.glob_to_node_dim(global_feature)
             global_feature = global_feature + self.cls_enc
             global_feature = global_feature.unsqueeze(1).expand(-1,1, -1)
+            global_feats.append(global_feature)
+            
             
             h_res = torch.cat([global_feature, h_res], dim=1)
 
@@ -268,9 +275,15 @@ class NMT(utils.backbone.VGG16_bn):
         hs_dec_output = hs_dec_output[:, 1:, :]
         ht_dec_output = ht_dec_output[:, 1:, :]
         
-        sim_score = self.w_cosine(hs_dec_output, ht_dec_output) #self.w_cosine(hs_dec_output, h_t_norm)
+        g = global_feats[0].squeeze(1) # [B, D]
+        a = self.gatedMLP(g)
         
-        return sim_score, hs_dec_output, ht_dec_output, layer_loss
+        hs_g = hs_dec_output * a.unsqueeze(1) # [B, ns, D]
+        ht_g = ht_dec_output * a.unsqueeze(1) # [B, nt, D]
+        
+        sim_score = self.w_cosine(hs_g, ht_g) #self.w_cosine(hs_dec_output, h_t_norm)
+        
+        return sim_score, hs_g, ht_g, layer_loss
 
 class PairwiseCosineSimilarity(nn.Module):
     def __init__(self, node_feature_dim):
@@ -290,3 +303,60 @@ class PairwiseCosineSimilarity(nn.Module):
         cosine_similarity = numerator / denominator  # Shape: [batch_size, nodes_x, nodes_y]
         
         return cosine_similarity
+
+class MLP(nn.Module):
+    """
+    Multilayer Perceptron (MLP) module with optional gating and dropout.
+
+    Args:
+        input_dim (int): Dimension of the input features.
+        hidden_dim (int): Dimension of the hidden layer.
+        output_dim (int): Dimension of the output features.
+        device (str or torch.device): Device to run the module on.
+    """
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        output_dim: int,
+        device = None
+    ):
+        super().__init__()
+        self.device = (('cuda' if torch.cuda.is_available() else
+                        'mps' if torch.backends.mps.is_available() else 'cpu')
+                        if device is None else device)
+
+        # the up, down, and gate projections
+        self.Wup = nn.Linear(input_dim, hidden_dim, bias=False, device=self.device)
+        self.Wgate = nn.Linear(input_dim, hidden_dim, bias=False, device=self.device)
+        self.Wdown = nn.Linear(hidden_dim, output_dim, bias=False, device=self.device)
+
+        # this flag designates Wdown to have a different parameter initialization as defined in model.py
+        self.Wdown.GPT_scale_init = 1
+
+        # the learnable scaling factors
+        self.s_u = Scale(hidden_dim, device=device)
+        self.s_v = Scale(hidden_dim, device=device)
+
+        # the varaince-controlling scaling term, needed to benefit from SiLU (see appendix A.1)
+        self.scale = math.sqrt(input_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the MLP module.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, input_dim).
+
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, seq_len, output_dim).
+        """
+        # our up & gate projections
+        u = self.Wup(x) # (batch_size, seq_len, hidden_dim)
+        v = self.Wgate(x)
+        # scale them
+        u = u * self.s_u()
+        v = v * self.s_v() * self.scale 
+        # now perform the nonlinearity gate
+        hidden = u * F.silu(v) # (batch_size, seq_len, hidden_dim)
+        return self.Wdown(hidden) # (batch_size, seq_len, output_dim)

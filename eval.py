@@ -87,6 +87,7 @@ def mgm_model_synchronizing(
 
         # fill in unary costs with function
         eps = 1e-8
+        #alpha = 1.0
         for u in range(ni):
             for v in range(nj):
                 s = float(mat[u,v])
@@ -101,6 +102,10 @@ def mgm_model_synchronizing(
                 else:  # "cosine"
                     cost = float(-s)
                     
+                # add cost margin to true matchings only from BBGM paper Section 3.3
+                #if perm_mat_list[idx][batch_idx, u, v] == 1:
+                #    cost -= alpha
+                
                 gm.add_assignment(u, v, cost)
 
         mgm_model.add_model(gm)
