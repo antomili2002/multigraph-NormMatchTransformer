@@ -23,103 +23,10 @@ from datetime import timedelta
 from sklearn.metrics import f1_score
 from data.data_loader_multigraph import GMDataset, get_dataloader
 import eval
-from model import MNMT, NMT
+from model import NMT
 from utils.config import cfg
 from utils.utils import update_params_from_cmdline, compute_grad_norm
 from utils.evaluation_metric import calculate_correct_and_valid, calculate_f1_score, get_pos_neg, get_pos_neg_from_lists
-
-class InfoNCE_Loss(torch.nn.Module):
-    def __init__(self, temperature):
-        super(InfoNCE_Loss, self).__init__()
-        self.temperature = torch.tensor(temperature, dtype=torch.float32)
-        #self.temperature = torch.nn.Parameter(torch.tensor(temperature, dtype=torch.float32))
-    def forward(self, similarity_tensor, pos_indices, source_Points, target_Points, similarity_tensor_2, pos_indices_2):
-        source_sim_numer = torch.bmm(source_Points, source_Points.transpose(1, 2))
-        source_sim_normed1 = torch.norm(source_Points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(2)
-        source_sim_normed2 = torch.norm(source_Points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(1)
-        source_sim_denominator = torch.bmm(source_sim_normed1, source_sim_normed2)
-        source_cosine_sim_ = source_sim_numer / source_sim_denominator
-        
-        
-        target_sim_numer = torch.bmm(target_Points, target_Points.transpose(1, 2))
-        target_sim_normed1 = torch.norm(target_Points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(2)
-        target_sim_normed2 = torch.norm(target_Points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(1)
-        target_sim_denominator = torch.bmm(target_sim_normed1, target_sim_normed2)
-        target_cosine_sim_ = target_sim_numer / target_sim_denominator
-        
-        ident_mat = torch.eye(source_cosine_sim_.shape[1]).to(device)
-        source_cosine_sim = source_cosine_sim_ - 2 * ident_mat
-        target_cosine_sim = target_cosine_sim_ - 2 * ident_mat
-
-        source_prot_score_max, _ = torch.max(source_cosine_sim, dim=-1)
-        source_prot_score_mean = torch.mean(source_prot_score_max, dim=-1)
-        source_prot_score_mean = torch.mean(source_prot_score_mean)
-        
-        target_prot_score_max, _ = torch.max(target_cosine_sim, dim=-1)
-        target_prot_score_mean = torch.mean(target_prot_score_max, dim=-1)
-        target_prot_score_mean = torch.mean(target_prot_score_mean)
-        
-        sim_score = similarity_tensor #torch.atanh(similarity_tensor)
-        logits = sim_score / self.temperature
-        loss_1 = F.cross_entropy(logits, pos_indices)
-        
-        logits_2 = similarity_tensor_2 / self.temperature
-        loss_2 = F.cross_entropy(logits_2, pos_indices_2)
-       
-        loss = loss_1 + loss_2 #(loss_1 + loss_2) / 2
-        return loss + source_prot_score_mean + target_prot_score_mean #  sq_forb_norm 
-    
-class SoftNearestNeighborSimLoss(torch.nn.Module):
-    def __init__(self, temperature: float = 0.1, eps: float = 1e-8):
-        super().__init__()
-        self.tau = temperature
-        self.eps = eps
-    
-    def forward(self, 
-                S_block: torch.Tensor,      # [B, M, M] 
-                labels: torch.Tensor,       # [B, M] int labels in [0, .., M-1) 
-                valid_mask: torch.Tensor,    # [B, M] bool mask for valid keypoints
-                points_embedding: list
-                ):
-        B, M, _ = S_block.shape
-        device = S_block.device
-        
-        # hyperspherical loss
-        hyperspherical_loss = 0.0
-        for points in points_embedding:
-            sim_number = torch.bmm(points, points.transpose(1, 2))
-            sim_normed1 = torch.norm(points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(2)
-            sim_normed2 = torch.norm(points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(1)
-            sim_denominator = torch.bmm(sim_normed1, sim_normed2)
-            cosine_sim_ = sim_number / sim_denominator
-            
-            ident_mat = torch.eye(cosine_sim_.shape[1]).to(device)
-            cosine_sim_ = cosine_sim_ - 2 * ident_mat
-            
-            prot_score_max, _ = torch.max(cosine_sim_, dim=-1)
-            prot_score_mean = torch.mean(prot_score_max, dim=-1)
-            prot_score_mean = torch.mean(prot_score_mean)
-            hyperspherical_loss += prot_score_mean
-        hyperspherical_loss = hyperspherical_loss / len(points_embedding)
-        
-        logits = S_block / self.tau
-        diag = torch.eye(M, device=device).unsqueeze(0)
-        logits = logits - diag * 1e9
-
-        mask_pos = labels.unsqueeze(2) == (labels.unsqueeze(1)) # same class mask [B, M, M]
-        mask_valid_pairs = valid_mask.unsqueeze(2) & valid_mask.unsqueeze(1) & ~torch.eye(M, device=logits.device).bool()
-
-        exp_logits = logits.exp()
-        numer = (exp_logits * mask_pos.float() * mask_valid_pairs.float()).sum(dim=2)
-        denom = (exp_logits * mask_valid_pairs.float()).sum(dim=2)
-
-        loss_i = torch.log((numer + self.eps) / (denom + self.eps))                   # [B,M]
-
-        # average per sample only over valid i
-        loss_per_sample = (loss_i * valid_mask.float()).sum(dim=1) / valid_mask.sum(dim=1).float()      # [B]
-
-        # final mean over batch
-        return -loss_per_sample.mean() + hyperspherical_loss
     
 class GenericInfoNCELoss(torch.nn.Module):
     def __init__(self, temperature: float = 0.1, margin: float = 1.0, eps: float = 1e-8):
@@ -195,7 +102,55 @@ class GenericInfoNCELoss(torch.nn.Module):
         loss_nce = total_loss / pair_count
         return loss_nce + hyperspherical_loss
     
+class SoftNearestNeighborSimLoss(torch.nn.Module):
+    def __init__(self, temperature: float = 0.1, eps: float = 1e-8):
+        super().__init__()
+        self.tau = temperature
+        self.eps = eps
     
+    def forward(self, 
+                sims_block: torch.Tensor,      # [B, M, M] 
+                labels: torch.Tensor,       # [B, M] int labels in [0, .., M-1) 
+                points_embedding: list
+                ):
+        N, M = sims_block.shape
+        device = sims_block.device
+        
+        # hyperspherical loss
+        hyperspherical_loss = 0.0
+        for points in points_embedding:
+            sim_number = torch.bmm(points, points.transpose(1, 2))
+            sim_normed1 = torch.norm(points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(2)
+            sim_normed2 = torch.norm(points, p=2, dim=-1).clamp(min=1e-8).unsqueeze(1)
+            sim_denominator = torch.bmm(sim_normed1, sim_normed2)
+            cosine_sim_ = sim_number / sim_denominator
+            
+            ident_mat = torch.eye(cosine_sim_.shape[1]).to(device)
+            cosine_sim_ = cosine_sim_ - 2 * ident_mat
+            
+            prot_score_max, _ = torch.max(cosine_sim_, dim=-1)
+            prot_score_mean = torch.mean(prot_score_max, dim=-1)
+            prot_score_mean = torch.mean(prot_score_mean)
+            hyperspherical_loss += prot_score_mean
+        hyperspherical_loss = hyperspherical_loss / len(points_embedding)
+        
+        dist = 1.0 - sims_block
+        logits = -dist / self.tau
+
+        exp_logits = logits.exp()
+        
+        pos_mask = torch.zeros_like(exp_logits)
+        pos_mask[torch.arange(N, device=device), labels] = 1.0
+
+        neg_mask = 1.0 - pos_mask
+        
+        numer = (exp_logits * pos_mask).sum(dim=1)
+        denom = (exp_logits * neg_mask).sum(dim=1)
+
+        loss_snn = -torch.log((numer + self.eps) / (denom + self.eps)).mean()                   # [B,M]
+
+        return loss_snn + hyperspherical_loss
+
 lr_schedules = {
     #TODO: CHANGE BACK TO 10
     "long_halving1": (32, (3, 8, 13, 20), 0.3),
@@ -321,20 +276,66 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 # forward
                 similarity_scores, s_points, t_points, layer_loss = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
                 eval_similarity_scores = similarity_scores.clone().detach()
-                sim_list = [similarity_scores]
-                batch_size = similarity_scores.shape[0]
-                point_embeddings = [s_points, t_points]
                 
-                idx = 0
+                batch_size = similarity_scores.shape[0]
+                points_embeddings = [s_points, t_points]
+                sim_list = [similarity_scores] # create sim_list for calculating pairewise snn_loss
+                
+                #idx = 0
+                #for i in range(K):
+                #    ni = n_points_gt_list[i]   # [B]
+                #    for j in range(i+1, K):
+                #        Pij = perm_mat_list[idx]    # [B, Mi, Mj]
+                #        for b, e in enumerate(ni):
+                #            Pij[b, e:, :] = 0
+                #        idx += 1
+                
+                all_sims   = []
+                all_labels = []
+
+                c = 0
                 for i in range(K):
+                    Mi = points_embeddings[i].shape[1]
                     ni = n_points_gt_list[i]   # [B]
                     for j in range(i+1, K):
-                        Pij = perm_mat_list[idx]    # [B, Mi, Mj]
-                        for b, e in enumerate(ni):
-                            Pij[b, e:, :] = 0
-                        idx += 1
-                
-                loss = criterion(sim_list, perm_mat_list, point_embeddings) #, prototype_score
+                        Mj = points_embeddings[j].shape[1]
+                        nj = n_points_gt_list[j]  # [B]
+
+                        # forward: i -> j
+                        Sij = sim_list[c]     # [B, Mi, Mj]
+                        Pij = perm_mat_list[c]    # [B, Mi, Mj]
+                        # zero‐out padded rows in source i
+                        for b in range(batch_size):
+                            Pij[b, ni[b]:, :] = 0
+                        has_one   = (Pij.sum(dim=2) > 0)                       # [B, Mi]
+                        mask3d    = has_one.unsqueeze(-1).expand_as(Pij)       # [B, Mi, Mj]
+                        sims_flat = Sij.masked_select(mask3d).view(-1, Mj)     # [N_ij, Mj]
+                        y_flat    = Pij.masked_select(mask3d).view(-1, Mj)     # [N_ij, Mj]
+                        labels_f  = y_flat.argmax(dim=1)                       # [N_ij]
+                        all_sims.append(sims_flat)
+                        all_labels.append(labels_f)
+
+                        # reverse: j -> i
+                        Sji = Sij.transpose(1,2)   # [B, Mj, Mi]
+                        Pji = Pij.transpose(1,2)   # [B, Mj, Mi]
+                        # zero‐out padded rows in source j (now rows of Sji)
+                        for b in range(batch_size):
+                            Pji[b, nj[b]:, :] = 0
+                        has_one_t   = (Pji.sum(dim=2) > 0)                      # [B, Mj]
+                        mask3d_t    = has_one_t.unsqueeze(-1).expand_as(Pji)    # [B, Mj, Mi]
+                        sims_flat_t = Sji.masked_select(mask3d_t).view(-1, Mi)  # [N_ji, Mi]
+                        y_flat_t    = Pji.masked_select(mask3d_t).view(-1, Mi)  # [N_ji, Mi]
+                        labels_r    = y_flat_t.argmax(dim=1)                    # [N_ji]
+                        all_sims.append(sims_flat_t)
+                        all_labels.append(labels_r)
+
+                        c += 1
+
+                # concatenate across all pairs & directions
+                sims_block   = torch.cat(all_sims,   dim=0)  # [N_total, M_max]
+                labels_block = torch.cat(all_labels, dim=0)  # [N_total]
+            
+                loss = criterion(sims_block, labels_block, points_embeddings) # prototype_score
                 loss = loss + layer_loss
                 loss.backward()
                 
@@ -495,7 +496,7 @@ if __name__ == "__main__":
     model = model.to(device)
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
-    criterion = GenericInfoNCELoss(temperature=cfg.TRAIN.temperature, margin = cfg.TRAIN.margin)
+    criterion = SoftNearestNeighborSimLoss(temperature=cfg.TRAIN.temperature)
     backbone_params = list(model.module.node_layers.parameters()) + list(model.module.edge_layers.parameters())
 
     backbone_ids = [id(item) for item in backbone_params]
