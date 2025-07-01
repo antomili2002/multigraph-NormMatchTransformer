@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.utils import to_dense_batch
+from torch_geometric.data import Data
 from scipy.optimize import linear_sum_assignment
 
 import utils.backbone
@@ -84,16 +85,33 @@ class NMT(utils.backbone.VGG16_bn):
     def __init__(self):
         super(NMT, self).__init__()
         self.model_name = 'Transformer'
-        self.psi = SConv(input_features=cfg.SPLINE_CNN.input_features, output_features=cfg.Matching_TF.d_model)
-        # self.mlp = MLPQuery(cfg.Matching_TF.d_model, 1024, cfg.Matching_TF.d_model, batch_norm=cfg.Matching_TF.batch_norm)
+        self.psi_2d = SConv(input_features=cfg.SPLINE_CNN.input_features, 
+                            output_features=cfg.Matching_TF.d_model,
+                            num_layers=2,
+                            dim = 2,
+                            kernel_size=5,
+                            aggr="max")
+        
+        # simple MLP to learn virtual coordinate z
+        self.mlp_z = nn.Sequential(
+            nn.Linear(cfg.Matching_TF.d_model, cfg.Matching_TF.d_model // 2),
+            nn.SiLU(),
+            nn.Linear(cfg.Matching_TF.d_model//2, 1)
+        )
+        
+        self.psi_3d = SConv(input_features=cfg.Matching_TF.d_model, 
+                            output_features=cfg.Matching_TF.d_model,
+                            num_layers=2,
+                            dim = 3,
+                            kernel_size=5,
+                            aggr="max")
         
         self.vgg_to_node_dim = nn.Linear(cfg.SPLINE_CNN.input_features, cfg.Matching_TF.d_model)
         self.glob_to_node_dim = nn.Linear(512, cfg.Matching_TF.d_model)
 
         self.s_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
         self.t_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
-        self.cls_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
-        # self.scaled_mlp = MLP_scaled(cfg.Matching_TF.d_model*2, cfg.Matching_TF.d_model//2, cfg.Matching_TF.d_model)      
+        self.cls_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))     
         
         self.pos_encoding = Pointwise2DPositionalEncoding(cfg.Matching_TF.d_model, 256, 256).cuda()
 
@@ -259,13 +277,6 @@ class NMT(utils.backbone.VGG16_bn):
                 
             padding_mask[idx, :, e+1:] = 1
             padding_mask[idx, e+1:, :] = 1
-        
-        #print(f"\n>>> IN NMT.forward")
-        #print(f" batch_size = {batch_size}")
-        #print(f" h_s.shape = {h_s.shape}")        # (batch_size, seq_len, dim)
-        #print(f" h_t.shape = {h_t.shape}")
-        #print(f" mask.shape = {mask.shape}")      # should be (batch_size, seq_len, seq_len)
-        #print(f" padding_mask.shape = {padding_mask.shape}")
         
         hs_dec_output, layer_losses1 = self.n_gpt_decoder(source_nodes = h_s, padding_mask=padding_mask, encoder_output=h_t)
         ht_dec_output, layer_losses2 = self.n_gpt_decoder_2(source_nodes = h_t, padding_mask=padding_mask, encoder_output=h_s)

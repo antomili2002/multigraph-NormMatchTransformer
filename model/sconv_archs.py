@@ -5,15 +5,16 @@ from torch_geometric.nn import SplineConv
 
 
 class SConv(torch.nn.Module):
-    def __init__(self, input_features, output_features):
+    def __init__(self, input_features, output_features, num_layers = 2, dim = 2, kernel_size = 5, aggr = "max"):
         super(SConv, self).__init__()
 
+        self.dim = dim
         self.in_channels = input_features
-        self.num_layers = 2
+        self.num_layers = num_layers
         self.convs = torch.nn.ModuleList()
 
         for _ in range(self.num_layers):
-            conv = SplineConv(input_features, output_features, dim=2, kernel_size=5, aggr="max")
+            conv = SplineConv(input_features, output_features, dim=dim, kernel_size=kernel_size, aggr=aggr)
             self.convs.append(conv)
             input_features = output_features
 

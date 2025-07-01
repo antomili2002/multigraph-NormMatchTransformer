@@ -4,7 +4,6 @@ import wandb
 from pathlib import Path
 import numpy as np
 import torch
-import mgm_py
 import math
 import pylibmgm
 import logging
@@ -12,7 +11,6 @@ import torch.nn.functional as F
 import torch.distributed as dist  # Add this import
 from scipy.optimize import linear_sum_assignment
 from itertools import combinations
-from permsync import perm_sync_batched, error_against_ground_truth_batched
 
 from utils.config import cfg
 from utils.evaluation_metric import calculate_correct_and_valid, matching_accuracy_from_lists, perm_distance_masked

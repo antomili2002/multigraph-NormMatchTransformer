@@ -4,7 +4,7 @@
   "exclude_willow_classes": false,
   "EVAL": {
     "SAMPLES": 1000,
-    "num_graphs_in_matching_instance": 3
+    "num_graphs_in_matching_instance": 5
   },
   "SPLINE_CNN": {
     "input_features": 1024,
@@ -37,6 +37,7 @@
     "random_swap": false,
     "AR": true,
     "temperature": 0.1,
+    "margin": 1.0,
     "rince_q": 0.5,
     "rince_lambda": 0.025
   },
@@ -46,7 +47,7 @@
   "visualization_params": {
     "reduced_vis": true
   },
-  "evaluate_only": true,
+  "evaluate_only": false,
   "model_dir": "./results/voc_basic/NMT",
   "log_dir": "runs/",
   "MODEL_ARCH": "NMT"
