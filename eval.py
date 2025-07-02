@@ -182,49 +182,42 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
 
             batch_num = data_list[0].size(0)    # batch size
             
-            pred_perm_mats = []                 # pairewise prediction
-            sim_matrices = []
-            
-            for idx, (g_i,g_j) in enumerate(pairs):     # pairewise inference loop
-                imgs_pair  = [data_list[g_i], data_list[g_j]]
-                pts_pair   = [points_gt[g_i], points_gt[g_j]]
-                edges_pair = [edges[g_i], edges[g_j]]
-                n_points_gt_pair = [n_points_gt[g_i], n_points_gt[g_j]]
-                
-                with torch.no_grad():
-                    sim, _, _, _ = model(
-                        images            = imgs_pair,
-                        points            = pts_pair,
-                        graphs            = edges_pair,
-                        n_points          = n_points_gt_pair,
-                        n_points_sample   = n_points_gt_pair[0],
-                        perm_mats         = [perm_mat_list[idx]],
-                        eval_pred_points  = None,
-                        in_training       = False,
-                    )
-                
-                sim_matrices.append(sim)    # [B, Ni, Nj]
-                
-                P_sink = sinkhorn_logspace(sim) # [B, Ni, Nj]
-                P_pred = hard_perm_from_sink(P_sink)
-                pred_perm_mats.append(P_pred)
+            with torch.no_grad():
+                sim_list, embeds, _ = model(
+                    images            = data_list,
+                    points            = points_gt,
+                    graphs            = edges,          # list of K Data
+                    n_points          = n_points_gt,
+                    n_points_sample   = n_points_gt[0],
+                    perm_mats         = perm_mat_list,
+                    in_training       = False,
+                )
 
+            pred_perm_mats = []
+            for sim in sim_list:
+                P_sink = sinkhorn_logspace(sim)      # [B, Mi_max, Mj_max]
+                P_pred = hard_perm_from_sink(P_sink) # [B, Mi_max, Mj_max]
+                pred_perm_mats.append(P_pred)
+            
             # slice out invalid padding of perm_mats and pred_mats
             # Accumulate correct vs valid counts for pre-sync
+            idx_c = 0
             correct_pre, valid_pre = 0.0, 0.0
-            for idx, (g_i, g_j) in enumerate(pairs):
+            for g_i in range(K):
                 n_i = n_points_gt[g_i]
-                n_j = n_points_gt[g_j]
-                for b in range(batch_num):
-                    ni, nj = n_i[b].item(), n_j[b].item()
-                    Pp = pred_perm_mats[idx][b, :ni, :nj]       # [ni×nj]
-                    Pg = perm_mat_list[idx][b, :ni, :nj]       # [ni×nj]
-                    # row-wise argmax → predict & gt indices
-                    pred_idx = Pp.argmax(dim=1, keepdim=True)  # [ni,1]
-                    gt_idx   = Pg.argmax(dim=1, keepdim=True)  # [ni,1]
-                    c, v = calculate_correct_and_valid(pred_idx, gt_idx)
-                    correct_pre += c
-                    valid_pre   += v
+                for g_j in range(g_i+1, K):
+                    n_j = n_points_gt[g_j]
+                    for b in range(batch_num):
+                        ni, nj = n_i[b].item(), n_j[b].item()
+                        Pp = pred_perm_mats[idx_c][b, :ni, :nj]       # [ni×nj]
+                        Pg = perm_mat_list[idx_c][b, :ni, :nj]       # [ni×nj]
+                        # row-wise argmax → predict & gt indices
+                        pred_idx = Pp.argmax(dim=1, keepdim=True)  # [ni,1]
+                        gt_idx   = Pg.argmax(dim=1, keepdim=True)  # [ni,1]
+                        c, v = calculate_correct_and_valid(pred_idx, gt_idx)
+                        correct_pre += c
+                        valid_pre   += v
+                    idx_c += 1
             pre_acc_batch = (correct_pre / valid_pre)
             sum_pre_acc += pre_acc_batch
             
@@ -235,7 +228,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                 sim_list_b = []
                 for idx, (i, j) in enumerate(pairs):
                     ni, nj = graph_sizes_b[i], graph_sizes_b[j]
-                    mat_b_full = sim_matrices[idx][b]
+                    mat_b_full = sim_list[idx][b]
                     mat_b = mat_b_full[:ni, :nj].detach().cpu().numpy()
                     sim_list_b.append(mat_b.astype(np.float64))
                 
@@ -244,7 +237,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                 
                 # create MgmModel, solve mgm and extract labelings
                 all_matches_b = mgm_model_synchronizing(
-                    sim_matrices     = sim_matrices,
+                    sim_matrices     = sim_list,
                     n_points_gt_list = n_points_gt,
                     pairs            = pairs,
                     batch_idx        = b,

@@ -200,6 +200,8 @@ class NMT(utils.backbone.VGG16_bn):
     ):
         batch_size = graphs[0].num_graphs
         orig_graph_list = []
+        K = len(graphs)
+        
         # for visualisation purposes only
         graph_list = []
         global_feats = []
@@ -225,7 +227,7 @@ class NMT(utils.backbone.VGG16_bn):
             vgg_features = self.vgg_to_node_dim(node_features)
             
             # splineCNN spatial features 
-            h = self.psi(graph)
+            h = self.psi_2d(graph)
 
             h_res = h + vgg_features
                             
@@ -246,55 +248,65 @@ class NMT(utils.backbone.VGG16_bn):
             global_feature_mask = torch.tensor([True]).unsqueeze(0).expand(h_res.size(0), -1).to(global_feature.device)
             mask = torch.cat([global_feature_mask, mask], dim=1)
 
-
             orig_graph_list.append((h_res,mask))
 
-        h_s, s_mask = orig_graph_list[0]
-        h_t, t_mask = orig_graph_list[1]
+        # pad all h_res to same seq-length M, expand mask to [B, M, M]
+        lengths = [h.shape[1] for h,_ in orig_graph_list]
+        M = max(lengths)
+        
+        padded, padded_mask = [], []
+        for (h, mask), n_pts in zip(orig_graph_list, n_points):
+            D = h.shape[-1]
+            # pad features
+            pad_feat = h.new_zeros((batch_size, M - h.size(1), D))
+            h_p = torch.cat([h, pad_feat], dim=1)      # [B, M, D]
 
-        assert h_s.size(0) == h_t.size(0), 'batch-sizes are not equal'
-        
-        # padding for unequal keypoints        
-        seq_s = h_s.size(1)   # 1 + n_points_src
-        seq_t = h_t.size(1)   # 1 + n_points_tgt
-        dim   = h_s.size(2)
-        max_seq = max(seq_s, seq_t)
+            # pad valid mask
+            pad_mask = torch.zeros((batch_size, M - mask.size(1)), dtype=torch.bool, device=mask.device)
+            valid_p = torch.cat([mask, pad_mask], dim=1)  # [B, M]
 
-        max_seq = max(seq_s, seq_t)
-        if seq_s < max_seq:
-            pad = torch.zeros((batch_size, max_seq-seq_s, dim), device=h_s.device)
-            h_s = torch.cat([h_s, pad], dim=1)
-        if seq_t < max_seq:
-            pad = torch.zeros((batch_size, max_seq-seq_t, dim), device=h_t.device)
-            h_t = torch.cat([h_t, pad], dim=1)
+            padded.append(h_p), padded_mask.append(valid_p)
+            
+        total_layer_loss = 0.0
+        embeddings = []
+        for i in range(K):
+            # source = graph i
+            src_h  = padded[i]       # [B, M, D]
+            src_pm = padded_mask[i]    # [B, M, M]
+
+            # build memory features & valid mask for all j != i
+            other_h   = [padded[j]   for j in range(K) if j!=i]
+            H_mem     = torch.cat(other_h, dim=1)  # [B, (K-1)M, D]
+            other_val = [padded_mask[j]  for j in range(K) if j!=i]
+            mem_valid = torch.cat(other_val, dim=1) # [B, (K-1)M]
+
+            # rectangular cross-attention ban-mask [B, M, (K-1)M]
+            src_inv   = ~src_pm             # [B, M]
+            mem_inv   = ~mem_valid              # [B, (K-1)M]
+            cross_mask= src_inv.unsqueeze(2) | mem_inv.unsqueeze(1)
+
+            out_i, loss_i = self.n_gpt_decoder(
+                source_nodes=src_h,
+                padding_mask=cross_mask,
+                encoder_output=H_mem
+            )
+            total_layer_loss += loss_i         # accumulate
+
+            # compute all sims between out_i and every out_j
+            feat_i = out_i[:, 1:, :]     # drop any CLS token at position 0
+            embeddings.append(feat_i)        # save the [B, M, D]
         
-        batch_size, seq_len, _ = h_s.shape
-        padding_mask = torch.zeros((batch_size, seq_len, seq_len), dtype=torch.bool).to(h_s.device)
+        sims = []
+        for i in range(K):
+            feat_i = embeddings[i]
+            for j in range(i+1, K):
+                feat_j = embeddings[j]
+                sim = self.w_cosine(feat_i, feat_j)
+                sims.append(sim)
         
-        for idx, e in enumerate(n_points_sample):
-            h_s[idx, e+1:, :] = 0
-            h_t[idx, e+1:, :] = 0
-                
-            padding_mask[idx, :, e+1:] = 1
-            padding_mask[idx, e+1:, :] = 1
+        avg_layer_loss = total_layer_loss / K
         
-        hs_dec_output, layer_losses1 = self.n_gpt_decoder(source_nodes = h_s, padding_mask=padding_mask, encoder_output=h_t)
-        ht_dec_output, layer_losses2 = self.n_gpt_decoder_2(source_nodes = h_t, padding_mask=padding_mask, encoder_output=h_s)
-        
-        layer_loss = (layer_losses1 + layer_losses2) / 2
-        
-        hs_dec_output = hs_dec_output[:, 1:, :]
-        ht_dec_output = ht_dec_output[:, 1:, :]
-        
-        g = global_feats[0].squeeze(1) # [B, D]
-        a = self.gatedMLP(g)
-        
-        hs_g = hs_dec_output * a.unsqueeze(1) # [B, ns, D]
-        ht_g = ht_dec_output * a.unsqueeze(1) # [B, nt, D]
-        
-        sim_score = self.w_cosine(hs_g, ht_g) #self.w_cosine(hs_dec_output, h_t_norm)
-        
-        return sim_score, hs_g, ht_g, layer_loss
+        return sims, embeddings, avg_layer_loss
 
 class PairwiseCosineSimilarity(nn.Module):
     def __init__(self, node_feature_dim):

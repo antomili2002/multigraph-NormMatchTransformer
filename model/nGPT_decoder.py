@@ -300,6 +300,7 @@ class CrossAttention(nn.Module):
             torch.Tensor: Output tensor of shape (batch_size, seq_len, dim).
         """
         batch_size, seq_len, _ = x.shape
+        _, mem_len, _ = memory.shape
         
         # Linear projections for queries, keys, and values
         q, k, v = self.Wq(x), self.Wk(memory), self.Wv(memory)
@@ -307,8 +308,8 @@ class CrossAttention(nn.Module):
 
         # Reshape projections to separate heads
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        k = k.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        v = v.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        k = k.view(batch_size, mem_len, self.num_heads, self.head_dim)
+        v = v.view(batch_size, mem_len, self.num_heads, self.head_dim)
 
         # applying RoPE
         # sin = freqs['sin'][:, :seq_len, :, :].to(self.device) 

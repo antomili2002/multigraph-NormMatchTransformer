@@ -274,12 +274,10 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
 
             with torch.set_grad_enabled(True):
                 # forward
-                similarity_scores, s_points, t_points, layer_loss = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
-                eval_similarity_scores = similarity_scores.clone().detach()
+                sim_list, points_embeddings, layer_loss = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
+                eval_similarity_scores = sim_list[0].clone().detach()
                 
-                batch_size = similarity_scores.shape[0]
-                points_embeddings = [s_points, t_points]
-                sim_list = [similarity_scores] # create sim_list for calculating pairewise snn_loss
+                batch_size = sim_list[0].shape[0]
                 
                 #idx = 0
                 #for i in range(K):
