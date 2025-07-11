@@ -128,9 +128,6 @@ class NMT(utils.backbone.VGG16_bn):
         self.global_state_dim = 1024
         self.d_hidden = 256
         
-        # alpha for gated costs
-        self.gatedMLP = MLP(cfg.Matching_TF.d_model, self.d_hidden, cfg.Matching_TF.d_model)
-        
         self.w_cosine = PairwiseCosineSimilarity(cfg.Matching_TF.d_model)
         
     
@@ -274,7 +271,7 @@ class NMT(utils.backbone.VGG16_bn):
             src_h  = padded[i]       # [B, M, D]
             src_pm = padded_mask[i]    # [B, M, M]
 
-            # build memory features & valid mask for all j != i
+            # memory features & valid mask for all j != i
             other_h   = [padded[j]   for j in range(K) if j!=i]
             H_mem     = torch.cat(other_h, dim=1)  # [B, (K-1)M, D]
             other_val = [padded_mask[j]  for j in range(K) if j!=i]
@@ -283,18 +280,17 @@ class NMT(utils.backbone.VGG16_bn):
             # rectangular cross-attention ban-mask [B, M, (K-1)M]
             src_inv   = ~src_pm             # [B, M]
             mem_inv   = ~mem_valid              # [B, (K-1)M]
-            cross_mask= src_inv.unsqueeze(2) | mem_inv.unsqueeze(1)
+            cross_mask= src_inv.unsqueeze(2) | mem_inv.unsqueeze(1) # [B, M, 1] OR [B, 1, (K-1)M]
 
             out_i, loss_i = self.n_gpt_decoder(
                 source_nodes=src_h,
                 padding_mask=cross_mask,
                 encoder_output=H_mem
             )
-            total_layer_loss += loss_i         # accumulate
+            total_layer_loss += loss_i        
 
-            # compute all sims between out_i and every out_j
-            feat_i = out_i[:, 1:, :]     # drop any CLS token at position 0
-            embeddings.append(feat_i)        # save the [B, M, D]
+            feat_i = out_i[:, 1:, :]     
+            embeddings.append(feat_i)        # [B, M, D]
         
         sims = []
         for i in range(K):

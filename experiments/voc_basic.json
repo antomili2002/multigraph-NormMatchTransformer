@@ -33,7 +33,7 @@
     "lr_schedule": "long_halving4",
     "clip_norm": 0,
     "weight_decay": 0,
-    "num_graphs_in_matching_instance": 3,
+    "num_graphs_in_matching_instance": 5,
     "random_swap": false,
     "AR": true,
     "temperature": 0.1,
@@ -48,7 +48,7 @@
     "reduced_vis": true
   },
   "evaluate_only": false,
-  "model_dir": "./results/voc_basic/NMT",
+  "model_dir": "./results/voc_basic/NMT_5",
   "log_dir": "runs/",
   "MODEL_ARCH": "NMT"
 }

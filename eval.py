@@ -99,10 +99,6 @@ def mgm_model_synchronizing(
                     cost = float(-math.atanh(s))
                 else:  # "cosine"
                     cost = float(-s)
-                    
-                # add cost margin to true matchings only from BBGM paper Section 3.3
-                #if perm_mat_list[idx][batch_idx, u, v] == 1:
-                #    cost -= alpha
                 
                 gm.add_assignment(u, v, cost)
 
@@ -242,7 +238,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                     pairs            = pairs,
                     batch_idx        = b,
                     parallel         = False,     
-                    sync             = True,     
+                    sync             = False,     
                     func             = "logit"
                 )
                 
