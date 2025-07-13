@@ -105,7 +105,7 @@ def mgm_model_synchronizing(
         mgm_model.add_model(gm)
     
     if parallel: # does not work because of std::out_of_range
-        sol = pylibmgm.solver.solve_mgm_parallel(mgm_model, opt_level=pylibmgm.solver.OptimizationLevel.DEFAULT, nr_threads=4)
+        sol = pylibmgm.solver.solve_mgm_parallel(mgm_model, opt_level=pylibmgm.solver.OptimizationLevel.DEFAULT)
     else:
         sol = pylibmgm.solver.solve_mgm(mgm_model, opt_level=pylibmgm.solver.OptimizationLevel.DEFAULT)
 

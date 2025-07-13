@@ -8,7 +8,7 @@ from torch_geometric.data import Data
 from scipy.optimize import linear_sum_assignment
 
 import utils.backbone
-from model.sconv_archs import SConv
+from model.sconv_archs import SConv, MGMSplineCNN
 from model.positionalEmbedding import Pointwise2DPositionalEncoding
 from utils.config import cfg
 from utils.feature_align import feature_align
@@ -42,6 +42,29 @@ def cosine_norm(x: torch.Tensor, dim=-1) -> torch.Tensor:
     norm = torch.norm(x, p=2, dim=dim, keepdim=True).clamp(min=1e-6)
     # divide by the magnitude to place on the unit hypersphere
     return x / norm
+
+def separate_features(emb, n_cat):
+    res = []
+    mscum = torch.cumsum(n_cat, dim=0)
+    for idx, n in enumerate(n_cat):
+        start = mscum[idx] - n
+        end = mscum[idx]
+        res.append(emb[start:end, :])
+    return res
+
+
+def features_in_edge_index(node_features, edge_index):
+    num_edges = edge_index.shape[1]
+    num_nodes, node_features_dim = node_features.shape
+    # (2, num_edges) -> (2 * num_edges)
+    flat_edges_idxs = edge_index.transpose(0, 1).reshape(-1)
+    node_features_in_edges = torch.index_select(
+        node_features, dim=0,
+        index=flat_edges_idxs)  # (2 * num_edges, node_features_dim)
+    new_shape = (num_edges, 2, node_features_dim)  # 100, 2, 1
+    node_features_in_edges = node_features_in_edges.reshape(new_shape).transpose(
+        0, 1)  # (2, num_edges, node_features_dim)
+    return node_features_in_edges
 
 class Scale(nn.Module):
     """
@@ -95,16 +118,18 @@ class NMT(utils.backbone.VGG16_bn):
         # simple MLP to learn virtual coordinate z
         self.mlp_z = nn.Sequential(
             nn.Linear(cfg.Matching_TF.d_model, cfg.Matching_TF.d_model // 2),
-            nn.SiLU(),
-            nn.Linear(cfg.Matching_TF.d_model//2, 1)
+            nn.ReLU(),
+            nn.Linear(cfg.Matching_TF.d_model//2, 1),
+            nn.Sigmoid()
         )
         
-        self.psi_3d = SConv(input_features=cfg.Matching_TF.d_model, 
-                            output_features=cfg.Matching_TF.d_model,
-                            num_layers=2,
-                            dim = 3,
-                            kernel_size=5,
-                            aggr="max")
+        self.psi_3d = MGMSplineCNN(in_channels=cfg.Matching_TF.d_model,
+                                   hidden_channels=cfg.Matching_TF.d_model,
+                                   out_channels=cfg.Matching_TF.d_model,
+                                   dim=3,
+                                   num_layers=2,
+                                   dropout=0.2,
+                                   aggr="max")
         
         self.vgg_to_node_dim = nn.Linear(cfg.SPLINE_CNN.input_features, cfg.Matching_TF.d_model)
         self.glob_to_node_dim = nn.Linear(512, cfg.Matching_TF.d_model)
@@ -224,9 +249,25 @@ class NMT(utils.backbone.VGG16_bn):
             vgg_features = self.vgg_to_node_dim(node_features)
             
             # splineCNN spatial features 
-            h = self.psi_2d(graph)
+            h2d = self.psi_2d(graph)
 
-            h_res = h + vgg_features
+            # predict depth
+            z = self.mlp_z(h2d)
+
+            # build 3-D edge_attr
+            src, tgt = graph.edge_index                      # [E]
+            dz   = 0.5*(z[src] - z[tgt])+0.5     # [E,1]
+            edge_attr_3d = torch.cat([graph.edge_attr, dz], dim=1)  # [E,3]
+
+            # clone a fresh Data object so 2-D and 3-D layers don't share caches
+            graph3d         = graph.clone()
+            graph3d.edge_attr = edge_attr_3d
+            graph3d.x        = h2d                          # use same node feats
+
+            #  3-D SplineCNN & residual 
+            gnn3d_out = self.psi_3d(graph3d) 
+            h_3d = gnn3d_out.x                      # [Ni, D]
+            h_res = h2d + 0.1 * h_3d + vgg_features
                             
             (h_res, mask) = to_dense_batch(h_res, graph.batch, fill_value=0)
 

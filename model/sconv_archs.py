@@ -71,3 +71,58 @@ class SiameseNodeFeaturesToEdgeFeatures(torch.nn.Module):
         new_edge_attrs = vertex_attrs_reshaped[0] - vertex_attrs_reshaped[1]
         graph.edge_attr = new_edge_attrs
         return graph
+
+class MGMSplineCNN(torch.nn.Module):
+    def __init__(self,
+                 in_channels,
+                 hidden_channels,
+                 out_channels,
+                 dim,
+                 num_layers,
+                 dropout=0.0,
+                 aggr='max'):
+        super(MGMSplineCNN, self).__init__()
+
+        self.in_channels = in_channels
+        self.hidden_channels = hidden_channels
+        self.out_channels = out_channels
+        self.dim = dim
+        self.num_layers = num_layers
+        self.dropout = dropout
+
+        self.convs = torch.nn.ModuleList()
+        for _ in range(num_layers - 1):
+            conv = SplineConv(in_channels,
+                              hidden_channels,
+                              dim,
+                              kernel_size=5,
+                              aggr=aggr)
+            self.convs.append(conv)
+            in_channels = hidden_channels
+        conv_final = SplineConv(hidden_channels,
+                                out_channels,
+                                dim,
+                                kernel_size=5,
+                                aggr=aggr)
+        self.convs.append(conv_final)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        for conv in self.convs:
+            conv.reset_parameters()
+
+    def forward(self, graph):
+        x, edge_index, edge_attr = graph.x, graph.edge_index, graph.edge_attr
+        for conv in self.convs[:-1]:
+            x = F.dropout(F.relu(conv(x, edge_index, edge_attr)),
+                          p=self.dropout,
+                          training=self.training)
+        x = self.convs[-1](x, edge_index, edge_attr)
+        graph.x = x
+        return graph
+
+    def __repr__(self):
+        return ('{}({}, {}, {}, dim={}, num_layers={}, dropout={})').format(
+            self.__class__.__name__, self.in_channels, self.hidden_channels,
+            self.out_channels, self.dim, self.num_layers, self.dropout)
