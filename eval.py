@@ -162,8 +162,13 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
         iter_num = 0
         ds.set_cls(cls)
         
-        sum_pre_acc = 0.0    # sum over batches of (correct_pre/valid_pre)
-        sum_post_acc = 0.0   # sum over batches of (correct_post/valid_post)
+        #sum_pre_acc = 0.0    # sum over batches of (correct_pre/valid_pre)
+        #sum_post_acc = 0.0   # sum over batches of (correct_post/valid_post)
+        
+        correct_pre_total  = 0.0    # running total of correct rows
+        valid_pre_total    = 0.0    # running total of valid   rows
+        correct_post_total = 0.0
+        valid_post_total   = 0.0
         
         result_dict = {}
         num_batches = 0
@@ -214,19 +219,13 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                         correct_pre += c
                         valid_pre   += v
                     idx_c += 1
-            pre_acc_batch = (correct_pre / valid_pre)
-            sum_pre_acc += pre_acc_batch
+            correct_pre_total += correct_pre
+            valid_pre_total += valid_pre
             
             correct_post = 0.0
             valid_post   = 0.0
             for b in range(batch_num):
                 graph_sizes_b = [n_points_gt[g][b].item() for g in range(K)] # graph-sizes for this example
-                sim_list_b = []
-                for idx, (i, j) in enumerate(pairs):
-                    ni, nj = graph_sizes_b[i], graph_sizes_b[j]
-                    mat_b_full = sim_list[idx][b]
-                    mat_b = mat_b_full[:ni, :nj].detach().cpu().numpy()
-                    sim_list_b.append(mat_b.astype(np.float64))
                 
                 logger = logging.getLogger("libmgm")
                 logger.setLevel(logging.WARNING) # set log level of mgm model
@@ -238,7 +237,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                     pairs            = pairs,
                     batch_idx        = b,
                     parallel         = False,     
-                    sync             = False,     
+                    sync             = True,     
                     func             = "logit"
                 )
                 
@@ -255,7 +254,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                     c, v = calculate_correct_and_valid(pred_idx, gt_idx)
                     correct_post += c
                     valid_post += v
-            
+                
                 for idx, (g_i, g_j) in enumerate(pairs):
                     ni = graph_sizes_b[g_i]
                     _, _, Ppost_np = all_matches_b[idx]  # shape (ni, nj)
@@ -270,9 +269,12 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                     result_dict[n_pts][0] += 1
                     result_dict[n_pts][1] += err_vec
             
-            num_batches += 1
-            post_acc_batch = (correct_post / valid_post)
-            sum_post_acc += post_acc_batch
+            correct_post_total += correct_post
+            valid_post_total += valid_post
+            
+            #num_batches += 1
+            #post_acc_batch = (correct_post / valid_post)
+            #sum_post_acc += post_acc_batch
             
             # progress print every 40 batches
             if iter_num % 40 == 0 and verbose: #cfg.STATISTIC_STEP
@@ -280,8 +282,11 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                 print("Class {:<8} Iteration {:<4} {:>4.2f}sample/s".format(cls, iter_num, running_speed))
                 running_since = time.time()
         
-        acc_pre_cls  = sum_pre_acc  / iter_num
-        acc_post_cls = sum_post_acc / iter_num
+        #acc_pre_cls  = sum_pre_acc  / iter_num
+        #acc_post_cls = sum_post_acc / iter_num
+        
+        acc_pre_cls  = correct_pre_total  / valid_pre_total
+        acc_post_cls = correct_post_total / valid_post_total
         
         accs_pre_sync[cls_inx] = acc_pre_cls
         accs_post_sync[cls_inx] = acc_post_cls

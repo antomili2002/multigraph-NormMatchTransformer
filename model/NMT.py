@@ -2,7 +2,7 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.nn.functional as functional
 from torch_geometric.utils import to_dense_batch
 from torch_geometric.data import Data
 from scipy.optimize import linear_sum_assignment
@@ -42,29 +42,6 @@ def cosine_norm(x: torch.Tensor, dim=-1) -> torch.Tensor:
     norm = torch.norm(x, p=2, dim=dim, keepdim=True).clamp(min=1e-6)
     # divide by the magnitude to place on the unit hypersphere
     return x / norm
-
-def separate_features(emb, n_cat):
-    res = []
-    mscum = torch.cumsum(n_cat, dim=0)
-    for idx, n in enumerate(n_cat):
-        start = mscum[idx] - n
-        end = mscum[idx]
-        res.append(emb[start:end, :])
-    return res
-
-
-def features_in_edge_index(node_features, edge_index):
-    num_edges = edge_index.shape[1]
-    num_nodes, node_features_dim = node_features.shape
-    # (2, num_edges) -> (2 * num_edges)
-    flat_edges_idxs = edge_index.transpose(0, 1).reshape(-1)
-    node_features_in_edges = torch.index_select(
-        node_features, dim=0,
-        index=flat_edges_idxs)  # (2 * num_edges, node_features_dim)
-    new_shape = (num_edges, 2, node_features_dim)  # 100, 2, 1
-    node_features_in_edges = node_features_in_edges.reshape(new_shape).transpose(
-        0, 1)  # (2, num_edges, node_features_dim)
-    return node_features_in_edges
 
 class Scale(nn.Module):
     """
@@ -139,8 +116,10 @@ class NMT(utils.backbone.VGG16_bn):
         self.cls_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))     
         
         self.pos_encoding = Pointwise2DPositionalEncoding(cfg.Matching_TF.d_model, 256, 256).cuda()
-
         
+        # add token-type embedding like BERT for graphs embeddings to let decoder know from which graph the attention comes
+        self.graph_embed = nn.Embedding(cfg.TRAIN.num_graphs_in_matching_instance, cfg.Matching_TF.d_model) 
+
         nGPT_decoder_config = ModelConfig()
         nGPT_decoder_config.dim = cfg.Matching_TF.d_model
         nGPT_decoder_config.num_layers = cfg.Matching_TF.n_decoder
@@ -148,10 +127,6 @@ class NMT(utils.backbone.VGG16_bn):
         nGPT_decoder_config.mlp_hidden_mult = cfg.Matching_TF.nGPT_mlp_hidden_mult
         
         self.n_gpt_decoder = NGPT_DECODER(nGPT_decoder_config)
-        self.n_gpt_decoder_2 = NGPT_DECODER(nGPT_decoder_config)
-        
-        self.global_state_dim = 1024
-        self.d_hidden = 256
         
         self.w_cosine = PairwiseCosineSimilarity(cfg.Matching_TF.d_model)
         
@@ -186,11 +161,6 @@ class NMT(utils.backbone.VGG16_bn):
             layer.alpha_G.s.data.abs_()
             layer.alpha_M.s.data.abs_()
         
-        for layer in self.n_gpt_decoder_2.layers:
-            layer.alpha_A.s.data.abs_()
-            layer.alpha_C.s.data.abs_()
-            layer.alpha_G.s.data.abs_()
-            layer.alpha_M.s.data.abs_()
         # Cosine normalize relevant Linear layers
         for module in self.modules():
             if isinstance(module, (nn.Linear, nn.Embedding)):
@@ -227,7 +197,7 @@ class NMT(utils.backbone.VGG16_bn):
         # for visualisation purposes only
         graph_list = []
         global_feats = []
-        for image, p, n_p, graph in zip(images, points, n_points, graphs):
+        for graph_idx,(image, p, n_p, graph) in enumerate(zip(images, points, n_points, graphs)):
             # extract feature
             # with torch.no_grad():
             nodes = self.node_layers(image)
@@ -241,6 +211,8 @@ class NMT(utils.backbone.VGG16_bn):
             F = concat_features(feature_align(edges, p, n_p, (256, 256)), n_p)
 
             node_features = torch.cat((U, F), dim=-1)
+            node_features = functional.dropout(node_features, p=cfg.TRAIN.dropout, training=self.training)
+            
             graph.x = node_features
             # for visualisation purposes only
             graph_list.append(graph.to_data_list())
@@ -250,7 +222,8 @@ class NMT(utils.backbone.VGG16_bn):
             
             # splineCNN spatial features 
             h2d = self.psi_2d(graph)
-
+            h2d = functional.dropout(h2d, p=cfg.TRAIN.dropout, training=self.training)
+            
             # predict depth
             z = self.mlp_z(h2d)
 
@@ -259,7 +232,6 @@ class NMT(utils.backbone.VGG16_bn):
             dz   = 0.5*(z[src] - z[tgt])+0.5     # [E,1]
             edge_attr_3d = torch.cat([graph.edge_attr, dz], dim=1)  # [E,3]
 
-            # clone a fresh Data object so 2-D and 3-D layers don't share caches
             graph3d         = graph.clone()
             graph3d.edge_attr = edge_attr_3d
             graph3d.x        = h2d                          # use same node feats
@@ -267,19 +239,21 @@ class NMT(utils.backbone.VGG16_bn):
             #  3-D SplineCNN & residual 
             gnn3d_out = self.psi_3d(graph3d) 
             h_3d = gnn3d_out.x                      # [Ni, D]
-            h_res = h2d + 0.1 * h_3d + vgg_features
+            h_res = h2d + 0.3 * h_3d + vgg_features
                             
             (h_res, mask) = to_dense_batch(h_res, graph.batch, fill_value=0)
 
-            if cfg.Matching_TF.pos_encoding:
+            if cfg.Matching_TF.pos_encoding: # set to true for keypoints positional encodings
                 h_res = h_res + self.pos_encoding(p)
-                
+                # add positional encoding for graphs    
+                gid = torch.full((batch_size, h_res.size(1)), graph_idx, dtype=torch.long, device=h_res.device)
+                h_res = h_res + self.graph_embed(gid)
+            
             global_feature = self.final_layers(edges)[0].reshape((nodes.shape[0], -1))
             global_feature = self.glob_to_node_dim(global_feature)
             global_feature = global_feature + self.cls_enc
             global_feature = global_feature.unsqueeze(1).expand(-1,1, -1)
             global_feats.append(global_feature)
-            
             
             h_res = torch.cat([global_feature, h_res], dim=1)
 
@@ -328,6 +302,7 @@ class NMT(utils.backbone.VGG16_bn):
                 padding_mask=cross_mask,
                 encoder_output=H_mem
             )
+            out_i = out_i * (1.0 / math.sqrt(K)) # scale using K graphs
             total_layer_loss += loss_i        
 
             feat_i = out_i[:, 1:, :]     
@@ -363,60 +338,3 @@ class PairwiseCosineSimilarity(nn.Module):
         cosine_similarity = numerator / denominator  # Shape: [batch_size, nodes_x, nodes_y]
         
         return cosine_similarity
-
-class MLP(nn.Module):
-    """
-    Multilayer Perceptron (MLP) module with optional gating and dropout.
-
-    Args:
-        input_dim (int): Dimension of the input features.
-        hidden_dim (int): Dimension of the hidden layer.
-        output_dim (int): Dimension of the output features.
-        device (str or torch.device): Device to run the module on.
-    """
-    def __init__(
-        self,
-        input_dim: int,
-        hidden_dim: int,
-        output_dim: int,
-        device = None
-    ):
-        super().__init__()
-        self.device = (('cuda' if torch.cuda.is_available() else
-                        'mps' if torch.backends.mps.is_available() else 'cpu')
-                        if device is None else device)
-
-        # the up, down, and gate projections
-        self.Wup = nn.Linear(input_dim, hidden_dim, bias=False, device=self.device)
-        self.Wgate = nn.Linear(input_dim, hidden_dim, bias=False, device=self.device)
-        self.Wdown = nn.Linear(hidden_dim, output_dim, bias=False, device=self.device)
-
-        # this flag designates Wdown to have a different parameter initialization as defined in model.py
-        self.Wdown.GPT_scale_init = 1
-
-        # the learnable scaling factors
-        self.s_u = Scale(hidden_dim, device=device)
-        self.s_v = Scale(hidden_dim, device=device)
-
-        # the varaince-controlling scaling term, needed to benefit from SiLU (see appendix A.1)
-        self.scale = math.sqrt(input_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of the MLP module.
-
-        Args:
-            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, input_dim).
-
-        Returns:
-            torch.Tensor: Output tensor of shape (batch_size, seq_len, output_dim).
-        """
-        # our up & gate projections
-        u = self.Wup(x) # (batch_size, seq_len, hidden_dim)
-        v = self.Wgate(x)
-        # scale them
-        u = u * self.s_u()
-        v = v * self.s_v() * self.scale 
-        # now perform the nonlinearity gate
-        hidden = u * F.silu(v) # (batch_size, seq_len, hidden_dim)
-        return self.Wdown(hidden) # (batch_size, seq_len, output_dim)
