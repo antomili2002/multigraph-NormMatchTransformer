@@ -211,7 +211,6 @@ class NMT(utils.backbone.VGG16_bn):
             F = concat_features(feature_align(edges, p, n_p, (256, 256)), n_p)
 
             node_features = torch.cat((U, F), dim=-1)
-            node_features = functional.dropout(node_features, p=cfg.TRAIN.dropout, training=self.training)
             
             graph.x = node_features
             # for visualisation purposes only
@@ -222,7 +221,6 @@ class NMT(utils.backbone.VGG16_bn):
             
             # splineCNN spatial features 
             h2d = self.psi_2d(graph)
-            h2d = functional.dropout(h2d, p=cfg.TRAIN.dropout, training=self.training)
             
             # predict depth
             z = self.mlp_z(h2d)

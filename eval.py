@@ -7,6 +7,7 @@ import torch
 import math
 import pylibmgm
 import logging
+import warnings
 import torch.nn.functional as F
 import torch.distributed as dist  # Add this import
 from scipy.optimize import linear_sum_assignment
@@ -59,6 +60,49 @@ def hard_perm_from_sink(P_sink: torch.Tensor) -> torch.Tensor:
         P_pred[b, r, c] = 1
     return P_pred.to(P_sink.device)
 
+def print_mgm(mgm: pylibmgm.MgmModel, *, max_costs_to_print: int = 20):
+    """
+    Pretty-print the content of an `MgmModel`.
+
+    Parameters
+    ----------
+    mgm : pylibmgm.MgmModel
+    max_costs_to_print : int
+        For very large graphs, printing the full cost matrix can flood stdout.
+        If either dimension > max_costs_to_print we print only the shape and
+        a count of NaNs instead of the full matrix.
+    """
+    print("=" * 72)
+    print(f"MgmModel  |  #graphs = {mgm.no_graphs}   #pair-models = {len(mgm.models)}")
+    print("-" * 72)
+
+    # show the individual Graph objects first
+    for g in mgm.graphs:
+        print(f"Graph id={g.id:<3}  |  #nodes = {g.no_nodes}")
+
+    print("=" * 72)
+
+    for (i, j), gm in sorted(mgm.models.items()):          # <-- idx_key is (id_i, id_j)
+        ni, nj = gm.graph1.no_nodes, gm.graph2.no_nodes
+        nA, nE = gm.no_assignments(), gm.no_edges()
+        print(f"pair ({i},{j})  {ni}x{nj}  |  assignments={nA:<3}  edges={nE}")
+
+        # rebuild unary-cost matrix
+        M = np.full((ni, nj), np.nan)
+        costmap = gm.costs()
+        for (u, v) in gm.assignment_list:
+            c = costmap.unary(u, v)
+            M[u, v] = c
+
+        big = max(ni, nj) > max_costs_to_print
+        if big:
+            nan_cnt = np.isnan(M).sum()
+            print(f"cost-matrix shape={M.shape}, NaNs={nan_cnt}")
+        else:
+            with np.printoptions(precision=3, suppress=True):
+                print(np.array2string(M, prefix="    "))
+        print("-" * 80)
+
 def mgm_model_synchronizing(
     sim_matrices,       # List[torch.Tensor], length C = K*(K-1)/2, each [B, Ni_max, Nj_max]
     n_points_gt_list,   # List[torch.Tensor], length K, each [B]
@@ -70,42 +114,55 @@ def mgm_model_synchronizing(
     ):
     
     K = len(n_points_gt_list)
-    device = sim_matrices[0].device
+    alpha = 2.0 # try 0.25, 0.5, 1, 2.0
     
     mgm_model = pylibmgm.MgmModel()
     
     for idx,(i,j) in enumerate(pairs):
         Si = sim_matrices[idx][batch_idx]             # [Ni_max, Nj_max]
+        
+        mu = Si.mean(-1, keepdim=True)
+        sigma = Si.std(-1, keepdim=True) + 1e-8
+        S_z = (Si - mu) / sigma
+        
         ni = int(n_points_gt_list[i][batch_idx].item())
         nj = int(n_points_gt_list[j][batch_idx].item())
-        mat = Si[:ni,:nj].detach().cpu().numpy()
+        mat = S_z[:ni,:nj].detach().cpu().numpy()
 
         # reserve exactly ni*nj unary costs, no quadratics
         gm = pylibmgm.GmModel(pylibmgm.Graph(i, ni), pylibmgm.Graph(j, nj), ni*nj, 0)
 
         # fill in unary costs with function
         eps = 1e-8
-        #alpha = 1.0
         for u in range(ni):
             for v in range(nj):
                 s = float(mat[u,v])
                 
-                # clamp to avoid + /- 1
-                if func in ("atanh", "logit"):
-                    s = max(-1+eps, min(1-eps, s))
-                if func == "logit":
-                    cost = float(-math.log((1+s)/(1-s)))
+                if func == "cosine":
+                    cost = -alpha * s
+                elif func == "logit":
+                    x = max(-1 + eps, min(1 - eps, alpha * s))
+                    cost = -math.log((1+x)/(1-x))
                 elif func == "atanh":
-                    cost = float(-math.atanh(s))
-                else:  # "cosine"
-                    cost = float(-s)
+                    x = max(-1 + eps, min(1 - eps, alpha * s))
+                    cost = -math.atanh(x)                
+                elif func == "logsig":
+                    # –log sigmoid(alpha s)  ==  softplus( –alpha s )
+                    cost = F.softplus(-alpha * torch.tensor(s)).item()
+                else:
+                    raise ValueError(f"unknown cost type '{func}'")
                 
                 gm.add_assignment(u, v, cost)
 
         mgm_model.add_model(gm)
     
+    #print_mgm(mgm_model)
+    
     if parallel: # does not work because of std::out_of_range
-        sol = pylibmgm.solver.solve_mgm_parallel(mgm_model, opt_level=pylibmgm.solver.OptimizationLevel.DEFAULT)
+        try:
+            sol = pylibmgm.solver.solve_mgm_parallel(mgm_model, opt_level=pylibmgm.solver.OptimizationLevel.DEFAULT)
+        except RuntimeError as e:
+            warnings.warn(f'parallel solver failed, running sequential: {e}')
     else:
         sol = pylibmgm.solver.solve_mgm(mgm_model, opt_level=pylibmgm.solver.OptimizationLevel.DEFAULT)
 
@@ -238,7 +295,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                     batch_idx        = b,
                     parallel         = False,     
                     sync             = True,     
-                    func             = "logit"
+                    func             = "cosine"
                 )
                 
                 # accumulate post-sync just like pre-sync
