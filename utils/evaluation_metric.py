@@ -204,3 +204,41 @@ def perm_distance_masked(P_pred, P_gt, n_valid):
         d  = nv - (Pp * Pg).sum()
         dists.append(d)
     return torch.stack(dists).mean()
+
+def count_cycle_inconsistencies(P_dict, sizes):
+    """
+    P_dict[(i,j)] : torch.Tensor [ni x nj], binary permutation matrices with i<j.
+    sizes         : list[int], sizes of graphs [n0, n1, ..., n_{K-1}]
+
+    Returns:
+        bad   : total #violations across all 3-cycles
+        total : total #matchings checked across all 3-cycles
+    """
+    K = len(sizes)
+    bad = 0
+    total = 0
+
+    for i in range(K):
+        ni = sizes[i]
+        for j in range(i+1, K):
+            nj = sizes[j]
+            for k in range(j+1, K):
+                nk = sizes[k]
+
+                # pairwise permutation matrices (ensure i<j ordering when storing)
+                P_ij = P_dict[(i, j)][:ni, :nj]
+                P_jk = P_dict[(j, k)][:nj, :nk]
+                P_ik = P_dict[(i, k)][:ni, :nk]
+
+                # compose i->j->k
+                P_comp = P_ij @ P_jk  # [ni x nk]
+
+                # convert to hard assignments
+                comp_idx = P_comp.argmax(dim=1)  # predicted via composition
+                pik_idx  = P_ik.argmax(dim=1)    # direct match i->k
+
+                mismatch = (comp_idx != pik_idx).sum().item()
+                bad   += mismatch
+                total += ni  # we checked ni rows for this triplet
+
+    return bad, total

@@ -14,7 +14,7 @@ from scipy.optimize import linear_sum_assignment
 from itertools import combinations
 
 from utils.config import cfg
-from utils.evaluation_metric import calculate_correct_and_valid, matching_accuracy_from_lists, perm_distance_masked
+from utils.evaluation_metric import calculate_correct_and_valid, count_cycle_inconsistencies
 from scipy.linalg import eigh
 
 def sinkhorn_logspace(
@@ -119,15 +119,14 @@ def mgm_model_synchronizing(
     mgm_model = pylibmgm.MgmModel()
     
     for idx,(i,j) in enumerate(pairs):
-        Si = sim_matrices[idx][batch_idx]             # [Ni_max, Nj_max]
+        ni = int(n_points_gt_list[i][batch_idx].item())
+        nj = int(n_points_gt_list[j][batch_idx].item())
+        Si = sim_matrices[idx][batch_idx][:ni, :nj]             # [Ni_max, Nj_max]
         
         mu = Si.mean(-1, keepdim=True)
         sigma = Si.std(-1, keepdim=True) + 1e-8
         S_z = (Si - mu) / sigma
-        
-        ni = int(n_points_gt_list[i][batch_idx].item())
-        nj = int(n_points_gt_list[j][batch_idx].item())
-        mat = S_z[:ni,:nj].detach().cpu().numpy()
+        mat = S_z.detach().cpu().numpy()
 
         # reserve exactly ni*nj unary costs, no quadratics
         gm = pylibmgm.GmModel(pylibmgm.Graph(i, ni), pylibmgm.Graph(j, nj), ni*nj, 0)
@@ -207,6 +206,12 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
     accs_pre_sync = torch.zeros(len(classes), device=device)
     accs_post_sync = torch.zeros(len(classes), device=device)
     
+    # per-class cycle inconsistency accumulators
+    bad_pre_cls   = torch.zeros(len(classes), dtype=torch.long)
+    rows_pre_cls  = torch.zeros(len(classes), dtype=torch.long)
+    bad_post_cls  = torch.zeros(len(classes), dtype=torch.long)
+    rows_post_cls = torch.zeros(len(classes), dtype=torch.long)
+    
     error_dist_dict = {}
     pairs = list(combinations(range(K), 2))
     
@@ -219,16 +224,12 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
         iter_num = 0
         ds.set_cls(cls)
         
-        #sum_pre_acc = 0.0    # sum over batches of (correct_pre/valid_pre)
-        #sum_post_acc = 0.0   # sum over batches of (correct_post/valid_post)
-        
         correct_pre_total  = 0.0    # running total of correct rows
         valid_pre_total    = 0.0    # running total of valid   rows
         correct_post_total = 0.0
         valid_post_total   = 0.0
         
         result_dict = {}
-        num_batches = 0
         
         for k, inputs in enumerate(dataloader, 1):
             iter_num = iter_num + 1
@@ -326,21 +327,39 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                     result_dict[n_pts][0] += 1
                     result_dict[n_pts][1] += err_vec
             
+                # build pre-sync dict
+                P_dict_pre = {}
+                idx_tmp = 0
+                for gi in range(K):
+                    for gj in range(gi+1, K):
+                        ni, nj = graph_sizes_b[gi], graph_sizes_b[gj]
+                        Pp = pred_perm_mats[idx_tmp][b, :ni, :nj]
+                        P_dict_pre[(gi, gj)] = Pp
+                        idx_tmp += 1
+                        
+                # build post-sync dict
+                P_dict_post = {}
+                for idx2, (gi, gj) in enumerate(pairs):
+                    ni, nj = graph_sizes_b[gi], graph_sizes_b[gj]
+                    _, _, P_np = all_matches_b[idx2]
+                    P_dict_post[(gi, gj)] = torch.tensor(P_np, dtype=torch.float32, device=device)
+
+                bad_p, rows_p = count_cycle_inconsistencies(P_dict_pre,  graph_sizes_b)
+                bad_q, rows_q = count_cycle_inconsistencies(P_dict_post, graph_sizes_b)
+
+                bad_pre_cls[cls_inx]   += bad_p
+                rows_pre_cls[cls_inx]  += rows_p
+                bad_post_cls[cls_inx]  += bad_q
+                rows_post_cls[cls_inx] += rows_q
+            
             correct_post_total += correct_post
             valid_post_total += valid_post
-            
-            #num_batches += 1
-            #post_acc_batch = (correct_post / valid_post)
-            #sum_post_acc += post_acc_batch
             
             # progress print every 40 batches
             if iter_num % 40 == 0 and verbose: #cfg.STATISTIC_STEP
                 running_speed = 40 * batch_num / (time.time() - running_since) #cfg.STATISTIC_STEP
                 print("Class {:<8} Iteration {:<4} {:>4.2f}sample/s".format(cls, iter_num, running_speed))
                 running_since = time.time()
-        
-        #acc_pre_cls  = sum_pre_acc  / iter_num
-        #acc_post_cls = sum_post_acc / iter_num
         
         acc_pre_cls  = correct_pre_total  / valid_pre_total
         acc_post_cls = correct_post_total / valid_post_total
@@ -351,7 +370,6 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
         # f1_scores[i] = epoch_f1
         if verbose:
             print(f"Class {cls} acc_pre_sync = {acc_pre_cls:.4f}, acc_post_sync = {acc_post_cls:.4f}")
-            #print(f"Avg inconsistent 3-cycles before sync: {avg_bad_pre:.2f}, after sync: {avg_bad_post:.2f}")
             
         error_dist_dict[cls] = result_dict
         
@@ -363,17 +381,29 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
     avg_pre = torch.mean(accs_pre_sync).item()
     avg_post = torch.mean(accs_post_sync).item()
     
+    # per-class cycle inconsistency % (pre & post)
+    cycle_pre_pct_cls  = 100.0 * bad_pre_cls.float()  / torch.clamp(rows_pre_cls.float(),  min=1)
+    cycle_post_pct_cls = 100.0 * bad_post_cls.float() / torch.clamp(rows_post_cls.float(), min=1)
+    
+    # global averages over classes
+    avg_cycle_pre_pct  = cycle_pre_pct_cls.mean().item()
+    avg_cycle_post_pct = cycle_post_pct_cls.mean().item()
+    
     if local_rank == output_rank:
         wandb.log({
                 "eval/avg_pre_sync":  avg_pre,
                 "eval/avg_post_sync": avg_post,
+                "eval/avg_cycle_inconsistency_pre_pct":  avg_cycle_pre_pct,
+                "eval/avg_cycle_inconsistency_post_pct": avg_cycle_post_pct,
                 "eval/time_s":       time_elapsed
         }, step=(eval_epoch or wandb.run.step))
         # log per-class accuracies too
-        for cls, pre, post in zip(classes, accs_pre_sync, accs_post_sync):
+        for cls, pre, post, cyc_pre, cyc_post in zip(classes, accs_pre_sync, accs_post_sync, cycle_pre_pct_cls, cycle_post_pct_cls):
             wandb.log({
                     f"eval/pre_sync/{cls}":  pre.item(),
-                    f"eval/post_sync/{cls}": post.item()
+                    f"eval/post_sync/{cls}": post.item(),
+                    f"eval/cycle_pre_pct/{cls}":  cyc_pre.item(),
+                    f"eval/cycle_post_pct/{cls}": cyc_post.item()
             }, step=(eval_epoch or wandb.run.step))
 
     model.train(mode=was_training)
@@ -381,7 +411,8 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
 
     print("Matching accuracy")
     for cls, pre_acc, post_acc in zip(classes, accs_pre_sync, accs_post_sync):
-        print("{}: pre sync = {:.4f}, after sync {:.4f}".format(cls, pre_acc, post_acc))
+        print(f"{cls}: pre = {pre_acc:.4f}, post = {post_acc:.4f} | "f"cycle_pre = {cyc_pre:.2f}%, cycle_post = {cyc_post:.2f}%")
     print("average pre sync = {:.4f}, average after sync = {:.4f}".format(torch.mean(accs_pre_sync), torch.mean(accs_post_sync)))
+    print(f"avg cycle inconsistency pre =  {avg_cycle_pre_pct:.2f}%, "f"post = {avg_cycle_post_pct:.2f}%")
 
     return accs_pre_sync, accs_post_sync, error_dist_dict
