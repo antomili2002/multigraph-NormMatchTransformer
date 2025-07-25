@@ -10,9 +10,15 @@ def locations_to_features_diffs(x_1, y_1, x_2, y_2):
     return res
 
 
-def build_graphs(P_np: np.ndarray, n: int, n_pad: int = None, edge_pad: int = None):
+def build_graphs(P_np: np.ndarray, n: int, graph_type: str = "fully", thre: float = None ,n_pad: int = None, edge_pad: int = None):
 
-    A = delaunay_triangulate(P_np[0:n, :])
+    if graph_type == "fully":
+        A = fully_connect(P_np[0:n, :], thre)
+    elif graph_type == "delaunay":
+        A = delaunay_triangulate(P_np[0:n, :])
+    else:
+        raise ValueError(f"unknown graph_type '{graph_type}'")
+
     edge_num = int(np.sum(A, axis=(0, 1)))
 
     if n_pad is None:
@@ -58,4 +64,21 @@ def delaunay_triangulate(P: np.ndarray):
             print("Traceback:")
             print(err)
             A = np.ones((n, n)) - np.eye(n)
+    return A
+
+def fully_connect(P: np.ndarray, thre=None):
+    """
+    Fully connect a graph.
+    :param P: point set
+    :param thre: edges that are longer than this threshold will be removed
+    :return: adjacency matrix A
+    """
+    n = P.shape[0]
+    A = np.ones((n, n)) - np.eye(n)
+    if thre is not None:
+        for i in range(n):
+            for j in range(i):
+                if np.linalg.norm(P[i] - P[j]) > thre:
+                    A[i, j] = 0
+                    A[j, i] = 0
     return A

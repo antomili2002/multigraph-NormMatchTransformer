@@ -103,76 +103,114 @@ def print_mgm(mgm: pylibmgm.MgmModel, *, max_costs_to_print: int = 20):
                 print(np.array2string(M, prefix="    "))
         print("-" * 80)
 
+def symmetric_softmax_costs(Fi: torch.Tensor,
+                            Fj: torch.Tensor,
+                            tau: float = 0.07,
+                            eps: float = 1e-9) -> torch.Tensor:
+    """
+    Fi: [ni, d] embeddings for graph i
+    Fj: [nj, d] embeddings for graph j
+    Return: cost matrix C [ni, nj] where C = -log( 0.5*(softmax_row + softmax_col) )
+    """
+    S = Fi @ Fj.t()                      # [ni, nj]
+
+    # row-wise and column-wise softmax
+    P_row = torch.softmax(tau * S, dim=1)            # row dist
+    P_col = torch.softmax(tau * S.T, dim=1).T            # column dist
+
+    P_sym = 0.5 * (P_row + P_col)               # symmetrical probabilities
+    #P_sym = P_sym.clamp_min(eps).clamp_max(1 - eps)
+
+    # c = -log((1 + p) / (1 - p))
+    C = -torch.log( (1 + P_sym) / (1 - P_sym) )
+    return C
+
 def mgm_model_synchronizing(
-    sim_matrices,       # List[torch.Tensor], length C = K*(K-1)/2, each [B, Ni_max, Nj_max]
-    n_points_gt_list,   # List[torch.Tensor], length K, each [B]
-    pairs,              # List of (i,j) in lex order
-    batch_idx,          # index of batch
-    sync=False,         # whether to post-sync
-    func = "logit"      # function for the unary costs
-    ):
-    
-    K = len(n_points_gt_list)
-    alpha = 2.0 # try 0.25, 0.5, 1, 2.0
-    
+    sim_matrices,         # list of pairwise similarity tensors
+    n_points_gt_list,     # list of [B] #nodes
+    pairs,                # list of (i,j)
+    batch_idx: int,
+    embeds: list,         # list of [B, Ni, D] embedding tensors
+    sync: bool = False,
+    func: str = "logit",  # "cosine" | "logit" | "atanh" | "logsig" | "softmax"
+    tau: float = 0.15,
+):
+    """Return list[(i,j,match_mat_ij)] for a single Batch index."""
+    alpha = 2.0
+    eps   = 1e-8
+
     mgm_model = pylibmgm.MgmModel()
-    
-    for idx,(i,j) in enumerate(pairs):
+
+    for idx, (i, j) in enumerate(pairs):
         ni = int(n_points_gt_list[i][batch_idx].item())
         nj = int(n_points_gt_list[j][batch_idx].item())
-        Si = sim_matrices[idx][batch_idx][:ni, :nj]             # [Ni_max, Nj_max]
-        
-        mu = Si.mean(-1, keepdim=True)
-        sigma = Si.std(-1, keepdim=True) + 1e-8
-        S_z = (Si - mu) / sigma
-        mat = S_z.detach().cpu().numpy()
 
-        # reserve exactly ni*nj unary costs, no quadratics
-        gm = pylibmgm.GmModel(pylibmgm.Graph(i, ni), pylibmgm.Graph(j, nj), ni*nj, 0)
+        if func == "softmax":
+            Fi = embeds[i][batch_idx]      # [ni, D]
+            Fj = embeds[j][batch_idx]      # [nj, D]
+            mat_np = symmetric_softmax_costs(Fi, Fj, tau=tau, eps=eps)  # [ni, nj]
+        else:
+            # start from cosine similarities
+            S  = sim_matrices[idx][batch_idx][:ni, :nj]      # [ni, nj]
+            mu = S.mean(-1, keepdim=True)
+            sigma = S.std(-1, keepdim=True) + 1e-8
+            S_z   = (S - mu) / sigma                         # z‑score per row
+            S_np  = S_z.cpu().numpy()
 
-        # fill in unary costs with function
-        eps = 1e-8
+            mat_np = np.empty_like(S_np)
+            for u in range(ni):
+                for v in range(nj):
+                    s = float(S_np[u, v])
+                    if func == "cosine":
+                        cost = -alpha * s
+                    elif func == "logit":
+                        x = max(-1 + eps, min(1 - eps, alpha * s))
+                        cost = -math.log((1 + x) / (1 - x))
+                    elif func == "atanh":
+                        x = max(-1 + eps, min(1 - eps, alpha * s))
+                        cost = -math.atanh(x)
+                    elif func == "logsig":
+                        cost = F.softplus(-alpha * torch.tensor(s)).item()
+                    else:
+                        raise ValueError(f"Unknown func '{func}'")
+                    mat_np[u, v] = cost
+
+        gm = pylibmgm.GmModel(
+            pylibmgm.Graph(i, ni),
+            pylibmgm.Graph(j, nj),
+            ni * nj,           # #unary
+            0                  # no quadratic edges yet
+        )
+
         for u in range(ni):
             for v in range(nj):
-                s = float(mat[u,v])
-                
-                if func == "cosine":
-                    cost = -alpha * s
-                elif func == "logit":
-                    x = max(-1 + eps, min(1 - eps, alpha * s))
-                    cost = -math.log((1+x)/(1-x))
-                elif func == "atanh":
-                    x = max(-1 + eps, min(1 - eps, alpha * s))
-                    cost = -math.atanh(x)                
-                elif func == "logsig":
-                    # –log sigmoid(alpha s)  ==  softplus( –alpha s )
-                    cost = F.softplus(-alpha * torch.tensor(s)).item()
-                else:
-                    raise ValueError(f"unknown cost type '{func}'")
-                
-                gm.add_assignment(u, v, cost)
+                gm.add_assignment(u, v, float(mat_np[u, v]))
 
         mgm_model.add_model(gm)
-    
-    #print_mgm(mgm_model)
-    sol = pylibmgm.solver.solve_mgm(mgm_model, opt_level=pylibmgm.solver.OptimizationLevel.DEFAULT)
+        
+    sol = pylibmgm.solver.solve_mgm(
+        mgm_model,
+        opt_level=pylibmgm.solver.OptimizationLevel.DEFAULT
+    )
 
     if sync:
-        sol = pylibmgm.solver.synchronize_solution(mgm_model, sol, feasible=True, iterations=3, opt_level=pylibmgm.solver.OptimizationLevel.DEFAULT)
-    
+        sol = pylibmgm.solver.synchronize_solution(
+            mgm_model, sol, feasible=True, iterations=3,
+            opt_level=pylibmgm.solver.OptimizationLevel.DEFAULT
+        )
+        
     out = []
     for (i, j) in pairs:
-        labels = sol[(i, j)]          # pylibmgm returns a GmSolution via __getitem__
-        #lab   = gmsol.labeling     
-        ni    = int(n_points_gt_list[i][batch_idx].item())
-        nj    = int(n_points_gt_list[j][batch_idx].item())
-        mat_ij = np.zeros((ni, nj), dtype=np.int32)
+        labels = sol[(i, j)]
+        ni = int(n_points_gt_list[i][batch_idx].item())
+        nj = int(n_points_gt_list[j][batch_idx].item())
+        M  = np.zeros((ni, nj), dtype=np.int32)
         for u, v in enumerate(labels):
             if 0 <= v < nj:
-                mat_ij[u, v] = 1
-        out.append((i, j, mat_ij))
-    
+                M[u, v] = 1
+        out.append((i, j, M))
     return out
+
 
 def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verbose=True):
     print("Start evaluation...")
@@ -286,8 +324,10 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                     n_points_gt_list = n_points_gt,
                     pairs            = pairs,
                     batch_idx        = b,  
+                    embeds           = embeds,
                     sync             = True,     
-                    func             = "cosine"
+                    func             = "cosine",
+                    tau              = 0.05
                 )
                 
                 # accumulate post-sync just like pre-sync

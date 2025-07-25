@@ -83,7 +83,7 @@ class GMDataset(Dataset):
         
         graph_list = []
         for p_gt, n_p_gt in zip(points_gt, n_points_gt):
-            edge_indices, edge_features = build_graphs(p_gt, n_p_gt)
+            edge_indices, edge_features = build_graphs(p_gt, n_p_gt, graph_type="delaunay") # cut out very long edges
 
             # Add dummy node features so the __slices__ of them is saved when creating a batch
             pos = torch.tensor(p_gt).to(torch.float32) / 256.0

@@ -629,16 +629,3 @@ class NGPT_DECODER(nn.Module):
         
         
         return logits, loss
-        # to un-limit the temperature of the final probability distribution (see page 2)
-        
-        #EDIT
-        # scaled_logits = logits * self.s_z()
-        
-        # loss = None
-        # if target_token_ids is not None: # if we're training, calculate the loss
-        #     loss = self.criterion(
-        #         scaled_logits.view(batch_size * seq_len, self.vocab_len),
-        #         target_token_ids.reshape(batch_size * seq_len)
-        #     )
-
-        # return logits, loss
