@@ -108,7 +108,6 @@ def mgm_model_synchronizing(
     n_points_gt_list,   # List[torch.Tensor], length K, each [B]
     pairs,              # List of (i,j) in lex order
     batch_idx,          # index of batch
-    parallel=False,     # whether to use solve_mgm_parallel
     sync=False,         # whether to post-sync
     func = "logit"      # function for the unary costs
     ):
@@ -156,14 +155,7 @@ def mgm_model_synchronizing(
         mgm_model.add_model(gm)
     
     #print_mgm(mgm_model)
-    
-    if parallel: # does not work because of std::out_of_range
-        try:
-            sol = pylibmgm.solver.solve_mgm_parallel(mgm_model, opt_level=pylibmgm.solver.OptimizationLevel.DEFAULT)
-        except RuntimeError as e:
-            warnings.warn(f'parallel solver failed, running sequential: {e}')
-    else:
-        sol = pylibmgm.solver.solve_mgm(mgm_model, opt_level=pylibmgm.solver.OptimizationLevel.DEFAULT)
+    sol = pylibmgm.solver.solve_mgm(mgm_model, opt_level=pylibmgm.solver.OptimizationLevel.DEFAULT)
 
     if sync:
         sol = pylibmgm.solver.synchronize_solution(mgm_model, sol, feasible=True, iterations=3, opt_level=pylibmgm.solver.OptimizationLevel.DEFAULT)
@@ -293,8 +285,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                     sim_matrices     = sim_list,
                     n_points_gt_list = n_points_gt,
                     pairs            = pairs,
-                    batch_idx        = b,
-                    parallel         = False,     
+                    batch_idx        = b,  
                     sync             = True,     
                     func             = "cosine"
                 )
@@ -410,7 +401,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
     ds.cls = cls_cache
 
     print("Matching accuracy")
-    for cls, pre_acc, post_acc in zip(classes, accs_pre_sync, accs_post_sync):
+    for cls, pre_acc, post_acc, cyc_pre, cyc_post in zip(classes, accs_pre_sync, accs_post_sync, cycle_pre_pct_cls, cycle_post_pct_cls):
         print(f"{cls}: pre = {pre_acc:.4f}, post = {post_acc:.4f} | "f"cycle_pre = {cyc_pre:.2f}%, cycle_post = {cyc_post:.2f}%")
     print("average pre sync = {:.4f}, average after sync = {:.4f}".format(torch.mean(accs_pre_sync), torch.mean(accs_post_sync)))
     print(f"avg cycle inconsistency pre =  {avg_cycle_pre_pct:.2f}%, "f"post = {avg_cycle_post_pct:.2f}%")
