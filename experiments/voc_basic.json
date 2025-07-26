@@ -15,6 +15,7 @@
     "n_encoder": 4,
     "n_decoder": 8,
     "d_model": 648,
+    "d_edge": 2,
     "nGPT_mlp_hidden_mult": 6,
     "activation": "relu",
     "batch_norm": true,
@@ -47,7 +48,7 @@
   "visualization_params": {
     "reduced_vis": true
   },
-  "evaluate_only": true,
+  "evaluate_only": false,
   "model_dir": "./results/voc_basic/NMT",
   "log_dir": "runs/",
   "MODEL_ARCH": "NMT"

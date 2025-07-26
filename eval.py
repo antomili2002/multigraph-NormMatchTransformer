@@ -272,7 +272,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
             batch_num = data_list[0].size(0)    # batch size
             
             with torch.no_grad():
-                sim_list, embeds, _ = model(
+                sim_list, embeds, edges_list, _= model(
                     images            = data_list,
                     points            = points_gt,
                     graphs            = edges,          # list of K Data

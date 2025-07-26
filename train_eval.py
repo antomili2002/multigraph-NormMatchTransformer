@@ -276,7 +276,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
 
             with torch.set_grad_enabled(True):
                 # forward
-                sim_list, points_embeddings, layer_loss = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
+                sim_list, points_embeddings, edges, layer_loss = model(data_list, points_gt_list, edges_list, n_points_gt_list, n_points_gt_sample, perm_mat_list)
                 eval_similarity_scores = sim_list[0].clone().detach()
                 
                 batch_size = sim_list[0].shape[0]

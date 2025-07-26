@@ -43,6 +43,17 @@ def cosine_norm(x: torch.Tensor, dim=-1) -> torch.Tensor:
     # divide by the magnitude to place on the unit hypersphere
     return x / norm
 
+def dense_edge_from_sparse(edge_index, edge_attr,
+                           num_nodes, d_edge, fill_value=0., device=None):
+    """(Ni,*)  ->  (Ni,Ni,d_e) dense tensor"""
+    out = torch.full((num_nodes, num_nodes, d_edge),
+                     fill_value, dtype=edge_attr.dtype,
+                     device=device or edge_attr.device)
+    src, dst = edge_index
+    out[src, dst] = edge_attr
+    out[dst, src] = edge_attr            # make it symmetric
+    return out
+
 class Scale(nn.Module):
     """
     A module that manages learnable scaling parameters to ensure different learning rates
@@ -78,6 +89,7 @@ class ModelConfig:
         # defaults to best available GPU/CPU
     num_layers: int = 6
     num_heads: int = 4 # number of heads in the multi-head attention mechanism
+    d_edge = int = 128
     mlp_hidden_mult: float = 4
     layer_loss_param: float = 0.3
 
@@ -85,6 +97,7 @@ class NMT(utils.backbone.VGG16_bn):
     def __init__(self):
         super(NMT, self).__init__()
         self.model_name = 'Transformer'
+        self.d_edge = cfg.Matching_TF.d_edge
         self.psi_2d = SConv(input_features=cfg.SPLINE_CNN.input_features, 
                             output_features=cfg.Matching_TF.d_model,
                             num_layers=2,
@@ -113,7 +126,8 @@ class NMT(utils.backbone.VGG16_bn):
 
         self.s_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
         self.t_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
-        self.cls_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))     
+        self.cls_enc = nn.Parameter(torch.randn(cfg.Matching_TF.d_model))
+        self.cls_enc_edges = nn.Parameter(torch.randn(cfg.Matching_TF.d_edge))      # shape = (d_edge,)     
         
         self.pos_encoding = Pointwise2DPositionalEncoding(cfg.Matching_TF.d_model, 256, 256).cuda()
         
@@ -124,6 +138,7 @@ class NMT(utils.backbone.VGG16_bn):
         nGPT_decoder_config.dim = cfg.Matching_TF.d_model
         nGPT_decoder_config.num_layers = cfg.Matching_TF.n_decoder
         nGPT_decoder_config.num_heads = cfg.Matching_TF.n_head # number of heads in the multi-head attention mechanism
+        nGPT_decoder_config.d_edge = cfg.Matching_TF.d_edge
         nGPT_decoder_config.mlp_hidden_mult = cfg.Matching_TF.nGPT_mlp_hidden_mult
         
         self.n_gpt_decoder = NGPT_DECODER(nGPT_decoder_config)
@@ -195,7 +210,7 @@ class NMT(utils.backbone.VGG16_bn):
         K = len(graphs)
         
         # for visualisation purposes only
-        graph_list = []
+        graph_list, edge_list = [], []
         global_feats = []
         for graph_idx,(image, p, n_p, graph) in enumerate(zip(images, points, n_points, graphs)):
             # extract feature
@@ -257,6 +272,36 @@ class NMT(utils.backbone.VGG16_bn):
 
             global_feature_mask = torch.tensor([True]).unsqueeze(0).expand(h_res.size(0), -1).to(global_feature.device)
             mask = torch.cat([global_feature_mask, mask], dim=1)
+            
+            e_dense_per_batch = []
+            for b in range(batch_size):
+                n_i = int(n_points[graph_idx][b])
+                
+                edge_src = graph.edge_index[0]
+                edge_dst = graph.edge_index[1]
+                node_mask = (graph.batch == b)
+                edge_mask = node_mask[edge_src] & node_mask[edge_dst]
+
+                remap = -torch.ones_like(graph.batch)
+                remap[node_mask] = torch.arange(n_i, device=h_res.device)
+                ei_local = remap[graph.edge_index[:, edge_mask]]   # (2,E_b)  in 0…Ni‑1
+                ea_local = graph.edge_attr[edge_mask]              # (E_b,d_edge)
+                
+                e_b  = dense_edge_from_sparse(
+                           ei_local,   # (2,E_b)
+                           ea_local,    # (E_b,d_e)
+                           n_i, self.d_edge, 0., device=h_res.device)
+                # (Ni,Ni,d_e)  -> pad to M later
+                    # CLS→node  and node→CLS are the same learnable vector
+                cls_vec = self.cls_enc_edges           # (d_e,)
+                # create a (Ni+1,Ni+1,d_e) tensor filled with cls_vec
+                e_full = cls_vec.expand(n_i+1, n_i+1, -1).clone()
+                # write the real edges into the lower‑right block
+                e_full[1:, 1:] = e_b
+                # keep symmetry
+                e_full[0, 0] = 0.                      # optional: CLS‑to‑CLS zero
+                e_dense_per_batch.append(e_full)       # (Ni+1,Ni+1,d_e)
+            edge_list.append(e_dense_per_batch) 
 
             orig_graph_list.append((h_res,mask))
 
@@ -264,8 +309,8 @@ class NMT(utils.backbone.VGG16_bn):
         lengths = [h.shape[1] for h,_ in orig_graph_list]
         M = max(lengths)
         
-        padded, padded_mask = [], []
-        for (h, mask), n_pts in zip(orig_graph_list, n_points):
+        padded, padded_mask, edge_pad = [], [], []
+        for (h, mask), e_list in zip(orig_graph_list, edge_list):
             D = h.shape[-1]
             # pad features
             pad_feat = h.new_zeros((batch_size, M - h.size(1), D))
@@ -277,12 +322,19 @@ class NMT(utils.backbone.VGG16_bn):
 
             padded.append(h_p), padded_mask.append(valid_p)
             
+            e_padded = torch.zeros(batch_size, M, M, self.d_edge, device=h.device)
+            for b, e_b in enumerate(e_list):          # e_b is (Ni,Ni,d_e)
+                ni = e_b.size(0)
+                e_padded[b, :ni, :ni] = e_b
+            edge_pad.append(e_padded)                 # keep B‐sized tensor
+            
         total_layer_loss = 0.0
-        embeddings = []
+        embeddings, edges = [], []
         for i in range(K):
             # source = graph i
             src_h  = padded[i]       # [B, M, D]
             src_pm = padded_mask[i]    # [B, M, M]
+            src_e   = edge_pad[i]      # [B,N,N,d_e]
 
             # memory features & valid mask for all j != i
             other_h   = [padded[j]   for j in range(K) if j!=i]
@@ -295,8 +347,9 @@ class NMT(utils.backbone.VGG16_bn):
             mem_inv   = ~mem_valid              # [B, (K-1)M]
             cross_mask= src_inv.unsqueeze(2) | mem_inv.unsqueeze(1) # [B, M, 1] OR [B, 1, (K-1)M]
 
-            out_i, loss_i = self.n_gpt_decoder(
+            out_i, out_e, loss_i = self.n_gpt_decoder(
                 source_nodes=src_h,
+                source_edges = src_e,    # [B, M, M, d_e]
                 padding_mask=cross_mask,
                 encoder_output=H_mem
             )
@@ -305,6 +358,7 @@ class NMT(utils.backbone.VGG16_bn):
 
             feat_i = out_i[:, 1:, :]     
             embeddings.append(feat_i)        # [B, M, D]
+            edges.append(out_e)
         
         sims = []
         for i in range(K):
@@ -316,7 +370,7 @@ class NMT(utils.backbone.VGG16_bn):
         
         avg_layer_loss = total_layer_loss / K
         
-        return sims, embeddings, avg_layer_loss
+        return sims, embeddings, edges, avg_layer_loss
 
 class PairwiseCosineSimilarity(nn.Module):
     def __init__(self, node_feature_dim):
