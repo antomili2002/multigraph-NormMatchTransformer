@@ -254,10 +254,8 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
         iter_num = 0
         ds.set_cls(cls)
         
-        correct_pre_total  = 0.0    # running total of correct rows
-        valid_pre_total    = 0.0    # running total of valid   rows
-        correct_post_total = 0.0
-        valid_post_total   = 0.0
+        sum_pre_acc = 0.0    # sum over batches of (correct_pre/valid_pre)
+        sum_post_acc = 0.0   # sum over batches of (correct_post/valid_post)
         
         result_dict = {}
         
@@ -307,11 +305,10 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                         correct_pre += c
                         valid_pre   += v
                     idx_c += 1
-            correct_pre_total += correct_pre
-            valid_pre_total += valid_pre
+            pre_acc_batch = (correct_pre / valid_pre)
+            sum_pre_acc += pre_acc_batch
             
-            correct_post = 0.0
-            valid_post   = 0.0
+            correct_post, valid_post = 0.0, 0.0
             for b in range(batch_num):
                 graph_sizes_b = [n_points_gt[g][b].item() for g in range(K)] # graph-sizes for this example
                 
@@ -383,8 +380,8 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                 bad_post_cls[cls_inx]  += bad_q
                 rows_post_cls[cls_inx] += rows_q
             
-            correct_post_total += correct_post
-            valid_post_total += valid_post
+            post_acc_batch = (correct_post / valid_post)
+            sum_post_acc += post_acc_batch
             
             # progress print every 40 batches
             if iter_num % 40 == 0 and verbose: #cfg.STATISTIC_STEP
@@ -392,8 +389,8 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                 print("Class {:<8} Iteration {:<4} {:>4.2f}sample/s".format(cls, iter_num, running_speed))
                 running_since = time.time()
         
-        acc_pre_cls  = correct_pre_total  / valid_pre_total
-        acc_post_cls = correct_post_total / valid_post_total
+        acc_pre_cls  = sum_pre_acc  / iter_num
+        acc_post_cls = sum_post_acc / iter_num
         
         accs_pre_sync[cls_inx] = acc_pre_cls
         accs_post_sync[cls_inx] = acc_post_cls
