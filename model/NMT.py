@@ -147,6 +147,9 @@ class NMT(utils.backbone.VGG16_bn):
         nGPT_decoder_config.num_heads = cfg.Matching_TF.n_head # number of heads in the multi-head attention mechanism
         nGPT_decoder_config.mlp_hidden_mult = cfg.Matching_TF.nGPT_mlp_hidden_mult
         
+        # add token-type embedding like BERT for graphs embeddings to let decoder know from which graph the attention comes
+        self.graph_embed = nn.Embedding(cfg.TRAIN.num_graphs_in_matching_instance, cfg.Matching_TF.d_model) 
+        
         self.n_gpt_decoder = NGPT_DECODER(nGPT_decoder_config)
         self.n_gpt_decoder_2 = NGPT_DECODER(nGPT_decoder_config)
         
@@ -227,7 +230,7 @@ class NMT(utils.backbone.VGG16_bn):
         # for visualisation purposes only
         graph_list = []
         global_feats = []
-        for image, p, n_p, graph in zip(images, points, n_points, graphs):
+        for graph_idx, (image, p, n_p, graph) in enumerate(zip(images, points, n_points, graphs)):
             # extract feature
             # with torch.no_grad():
             nodes = self.node_layers(image)
@@ -273,6 +276,8 @@ class NMT(utils.backbone.VGG16_bn):
 
             if cfg.Matching_TF.pos_encoding:
                 h_res = h_res + self.pos_encoding(p)
+                gid = torch.full((batch_size, h_res.size(1)), graph_idx, dtype=torch.long, device=h_res.device)
+                h_res = h_res + self.graph_embed(gid)
                 
             global_feature = self.final_layers(edges)[0].reshape((nodes.shape[0], -1))
             global_feature = self.glob_to_node_dim(global_feature)
