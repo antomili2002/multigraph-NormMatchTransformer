@@ -333,8 +333,9 @@ class NMT(utils.backbone.VGG16_bn):
                 padding_mask=cross_mask,
                 encoder_output=H_mem
             )
+            #out_i = out_i * (1.0 / math.sqrt(K)) # scale using K graphs
             total_layer_loss += loss_i        
-
+            
             feat_i = out_i[:, 1:, :]     
             embeddings.append(feat_i)        # [B, M, D]
         

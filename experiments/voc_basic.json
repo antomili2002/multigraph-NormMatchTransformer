@@ -13,7 +13,7 @@
   "Matching_TF": {
     "n_head": 12,
     "n_encoder": 4,
-    "n_decoder": 4,
+    "n_decoder": 8,
     "d_model": 648,
     "nGPT_mlp_hidden_mult": 6,
     "activation": "relu",
@@ -47,7 +47,7 @@
   "visualization_params": {
     "reduced_vis": true
   },
-  "evaluate_only": false,
+  "evaluate_only": true,
   "model_dir": "./results/voc_basic/NMT_3dSpline_posenc",
   "log_dir": "runs/",
   "MODEL_ARCH": "NMT"
