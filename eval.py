@@ -168,6 +168,29 @@ def mgm_model_synchronizing(
         out.append((i, j, M))
     return out
 
+def f1_counts_from_row_argmax(pred_idx: torch.Tensor, gt_idx: torch.Tensor):
+    """
+    pred_idx, gt_idx: [ni, 1] long tensors with the predicted/true column index per row.
+    Returns TP, FP, FN as int64 tensors on the same device.
+
+    With one prediction & one GT per row:
+      - TP = #rows where pred == gt
+      - Every mistake creates one FP and one FN
+    """
+    correct = (pred_idx == gt_idx).squeeze(1)
+    tp = correct.sum().to(torch.int64)
+    wrong = (~correct).sum().to(torch.int64)
+    fp = wrong
+    fn = wrong
+    return tp, fp, fn
+
+def f1_from_counts(tp: torch.Tensor, fp: torch.Tensor, fn: torch.Tensor) -> torch.Tensor:
+    eps = torch.tensor(1e-8, device=tp.device, dtype=torch.float32)
+    tp = tp.to(torch.float32); fp = fp.to(torch.float32); fn = fn.to(torch.float32)
+    prec = tp / (tp + fp + eps)
+    rec  = tp / (tp + fn + eps)
+    return 2 * prec * rec / (prec + rec + eps)
+
 def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verbose=True):
     print("Start evaluation...")
     since = time.time()
@@ -192,6 +215,16 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
     accs_pre_sync = torch.zeros(len(classes), device=device)
     accs_post_sync = torch.zeros(len(classes), device=device)
     
+    f1_scores_pre = torch.zeros(len(classes), device=device)
+    f1_scores_post = torch.zeros(len(classes), device=device)
+    
+    tp_pre_global  = torch.tensor(0, dtype=torch.int64, device=device)
+    fp_pre_global  = torch.tensor(0, dtype=torch.int64, device=device)
+    fn_pre_global  = torch.tensor(0, dtype=torch.int64, device=device)
+    tp_post_global = torch.tensor(0, dtype=torch.int64, device=device)
+    fp_post_global = torch.tensor(0, dtype=torch.int64, device=device)
+    fn_post_global = torch.tensor(0, dtype=torch.int64, device=device)
+    
     error_dist_dict = {}
     pairs = list(combinations(range(K), 2))
     
@@ -207,9 +240,16 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
         sum_pre_acc = 0.0    # sum over batches of (correct_pre/valid_pre)
         sum_post_acc = 0.0   # sum over batches of (correct_post/valid_post)
         
+        tp_pre_cls  = torch.tensor(0, dtype=torch.int64, device=device)
+        fp_pre_cls  = torch.tensor(0, dtype=torch.int64, device=device)
+        fn_pre_cls  = torch.tensor(0, dtype=torch.int64, device=device)
+        tp_post_cls = torch.tensor(0, dtype=torch.int64, device=device)
+        fp_post_cls = torch.tensor(0, dtype=torch.int64, device=device)
+        fn_post_cls = torch.tensor(0, dtype=torch.int64, device=device)
+        
         result_dict = {}
         num_batches = 0
-        
+
         for k, inputs in enumerate(dataloader, 1):
             iter_num = iter_num + 1
             data_list = [_.cuda() for _ in inputs["images"]]
@@ -255,6 +295,11 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                         c, v = calculate_correct_and_valid(pred_idx, gt_idx)
                         correct_pre += c
                         valid_pre   += v
+                        
+                        tp_, fp_, fn_ = f1_counts_from_row_argmax(pred_idx, gt_idx)
+                        tp_pre_cls  += tp_; fp_pre_cls  += fp_; fn_pre_cls  += fn_
+                        tp_pre_global += tp_; fp_pre_global += fp_; fn_pre_global += fn_
+                        
                     idx_c += 1
             pre_acc_batch = (correct_pre / valid_pre)
             sum_pre_acc += pre_acc_batch
@@ -298,6 +343,11 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                     c, v = calculate_correct_and_valid(pred_idx, gt_idx)
                     correct_post += c
                     valid_post += v
+
+                    tp_, fp_, fn_ = f1_counts_from_row_argmax(pred_idx, gt_idx)
+                    tp_post_cls  += tp_; fp_post_cls  += fp_; fn_post_cls  += fn_
+                    tp_post_global += tp_; fp_post_global += fp_; fn_post_global += fn_
+            
             
                 for idx, (g_i, g_j) in enumerate(pairs):
                     ni = graph_sizes_b[g_i]
@@ -329,6 +379,11 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
         accs_pre_sync[cls_inx] = acc_pre_cls
         accs_post_sync[cls_inx] = acc_post_cls
         
+        f1_pre_cls  = f1_from_counts(tp_pre_cls,  fp_pre_cls,  fn_pre_cls)
+        f1_post_cls = f1_from_counts(tp_post_cls, fp_post_cls, fn_post_cls)
+        f1_scores_pre[cls_inx]  = f1_pre_cls
+        f1_scores_post[cls_inx] = f1_post_cls
+        
         # f1_scores[i] = epoch_f1
         if verbose:
             print(f"Class {cls} acc_pre_sync = {acc_pre_cls:.4f}, acc_post_sync = {acc_post_cls:.4f}")
@@ -344,12 +399,25 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
     avg_pre = torch.mean(accs_pre_sync).item()
     avg_post = torch.mean(accs_post_sync).item()
     
+    f1_macro_pre  = torch.mean(f1_scores_pre).item()
+    f1_macro_post = torch.mean(f1_scores_post).item()
+    f1_micro_pre  = f1_from_counts(tp_pre_global,  fp_pre_global,  fn_pre_global).item()
+    f1_micro_post = f1_from_counts(tp_post_global, fp_post_global, fn_post_global).item()
+    
     if local_rank == output_rank:
         wandb.log({
                 "eval/avg_pre_sync":  avg_pre,
                 "eval/avg_post_sync": avg_post,
                 "eval/time_s":       time_elapsed
         }, step=(eval_epoch or wandb.run.step))
+        
+        wandb.log({
+            "eval/f1_micro_pre":  f1_micro_pre,
+            "eval/f1_micro_post": f1_micro_post,
+            "eval/f1_macro_pre":  f1_macro_pre,
+            "eval/f1_macro_post": f1_macro_post,
+        }, step=(eval_epoch or wandb.run.step))
+        
         # log per-class accuracies too
         for cls, pre, post in zip(classes, accs_pre_sync, accs_post_sync):
             wandb.log({
@@ -361,8 +429,10 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
     ds.cls = cls_cache
 
     print("Matching accuracy")
-    for cls, pre_acc, post_acc in zip(classes, accs_pre_sync, accs_post_sync):
-        print("{}: pre sync = {:.4f}, after sync {:.4f}".format(cls, pre_acc, post_acc))
+    for cls, pre_acc, post_acc, f1pre, f1post in zip(classes, accs_pre_sync, accs_post_sync, f1_scores_pre, f1_scores_post):
+        print("{}: pre sync = {:.4f}, post sync = {:.4f} | f1_pre = {:.4f}, f1_post = {:.4f}".format(cls, pre_acc, post_acc, f1pre, f1post))
     print("average pre sync = {:.4f}, average after sync = {:.4f}".format(torch.mean(accs_pre_sync), torch.mean(accs_post_sync)))
+    print("Macro F1      pre = {:.4f}, post = {:.4f}".format(torch.mean(f1_scores_pre), torch.mean(f1_scores_post)))
+    print("Micro (global) F1 pre = {:.4f}, post = {:.4f}".format(f1_micro_pre, f1_micro_post))
 
     return accs_pre_sync, accs_post_sync, error_dist_dict
