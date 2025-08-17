@@ -191,6 +191,16 @@ def f1_from_counts(tp: torch.Tensor, fp: torch.Tensor, fn: torch.Tensor) -> torc
     rec  = tp / (tp + fn + eps)
     return 2 * prec * rec / (prec + rec + eps)
 
+def f1_counts_from_perm(P_pred: torch.Tensor, P_gt: torch.Tensor):
+    # P_pred, P_gt: [ni, nj], binary (0/1) – or threshold P_pred if soft.
+    pred = (P_pred > 0.5).to(torch.int64)
+    gt   = (P_gt   > 0.5).to(torch.int64)
+
+    tp = (pred & gt).sum().to(torch.int64)
+    fp = (pred.sum() - tp).to(torch.int64)
+    fn = (gt.sum()   - tp).to(torch.int64)
+    return tp, fp, fn
+
 def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verbose=True):
     print("Start evaluation...")
     since = time.time()
@@ -296,7 +306,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                         correct_pre += c
                         valid_pre   += v
                         
-                        tp_, fp_, fn_ = f1_counts_from_row_argmax(pred_idx, gt_idx)
+                        tp_, fp_, fn_ = f1_counts_from_perm(Pp, Pg)
                         tp_pre_cls  += tp_; fp_pre_cls  += fp_; fn_pre_cls  += fn_
                         tp_pre_global += tp_; fp_pre_global += fp_; fn_pre_global += fn_
                         
@@ -344,7 +354,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                     correct_post += c
                     valid_post += v
 
-                    tp_, fp_, fn_ = f1_counts_from_row_argmax(pred_idx, gt_idx)
+                    tp_, fp_, fn_ = f1_counts_from_perm(P_post, Pg)
                     tp_post_cls  += tp_; fp_post_cls  += fp_; fn_post_cls  += fn_
                     tp_post_global += tp_; fp_post_global += fp_; fn_post_global += fn_
             

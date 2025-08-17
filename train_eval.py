@@ -110,7 +110,8 @@ class SoftNearestNeighborSimLoss(torch.nn.Module):
     
     def forward(self, 
                 sims_block: torch.Tensor,      # [B, M, M] 
-                labels: torch.Tensor,       # [B, M] int labels in [0, .., M-1) 
+                pos_mask: torch.Tensor,       # [B, M] int labels in [0, .., M-1)
+                valid_mask: torch.Tensor, 
                 points_embedding: list
                 ):
         N, M = sims_block.shape
@@ -139,13 +140,22 @@ class SoftNearestNeighborSimLoss(torch.nn.Module):
 
         exp_logits = logits.exp()
         
-        pos_mask = torch.zeros_like(exp_logits)
-        pos_mask[torch.arange(N, device=device), labels] = 1.0
+        #pos_mask = torch.zeros_like(exp_logits)
+        #pos_mask[torch.arange(N, device=device), labels] = 1.0
 
-        neg_mask = 1.0 - pos_mask
+        #neg_mask = 1.0 - pos_mask
+        
+        # mask out invalid columns before softmax/exp
+        very_neg = torch.finfo(logits.dtype).min
+        logits = torch.where(valid_mask.bool(), logits, torch.full_like(logits, very_neg))
+
+        # numerical stability
+        logits = logits - logits.max(dim=1, keepdim=True).values
+        exp_logits = torch.exp(logits) * valid_mask
         
         numer = (exp_logits * pos_mask).sum(dim=1)
-        denom = (exp_logits * neg_mask).sum(dim=1)
+        #denom = (exp_logits * neg_mask).sum(dim=1)
+        denom = exp_logits.sum(dim=1)
 
         loss_snn = -torch.log((numer + self.eps) / (denom + self.eps)).mean()                   # [B,M]
 
@@ -218,7 +228,7 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
         # assert resume
         if local_rank == output_rank:
             print(f"Evaluating without training...")
-            evaluation_epoch = 29
+            evaluation_epoch = 30
             accs_pre, accs_post, error_dict = eval.eval_model(model, dataloader["test"], local_rank, output_rank, eval_epoch=evaluation_epoch)
             all_error_dict[evaluation_epoch] = error_dict
             acc_dict = {
@@ -290,52 +300,74 @@ def train_eval_model(model, criterion, optimizer, dataloader, max_norm, num_epoc
                 #            Pij[b, e:, :] = 0
                 #        idx += 1
                 
-                all_sims   = []
-                all_labels = []
+                
+                rows_accum   = [[] for _ in range(K)]  # list of [N_i, Mj] blocks, later cat along dim=1
+                pos_accum    = [[] for _ in range(K)]  # same shape, multi-hot per block
+                valid_accum  = [[] for _ in range(K)]  # same shape, 1 for valid (unpadded) columns
 
-                c = 0
+                c = 0 
                 for i in range(K):
                     Mi = points_embeddings[i].shape[1]
-                    ni = n_points_gt_list[i]   # [B]
+                    ni = n_points_gt_list[i]  # [B]
                     for j in range(i+1, K):
                         Mj = points_embeddings[j].shape[1]
                         nj = n_points_gt_list[j]  # [B]
 
-                        # forward: i -> j
-                        Sij = sim_list[c]     # [B, Mi, Mj]
-                        Pij = perm_mat_list[c]    # [B, Mi, Mj]
-                        # zero‐out padded rows in source i
-                        for b in range(batch_size):
-                            Pij[b, ni[b]:, :] = 0
-                        has_one   = (Pij.sum(dim=2) > 0)                       # [B, Mi]
-                        mask3d    = has_one.unsqueeze(-1).expand_as(Pij)       # [B, Mi, Mj]
-                        sims_flat = Sij.masked_select(mask3d).view(-1, Mj)     # [N_ij, Mj]
-                        y_flat    = Pij.masked_select(mask3d).view(-1, Mj)     # [N_ij, Mj]
-                        labels_f  = y_flat.argmax(dim=1)                       # [N_ij]
-                        all_sims.append(sims_flat)
-                        all_labels.append(labels_f)
-
-                        # reverse: j -> i
-                        Sji = Sij.transpose(1,2)   # [B, Mj, Mi]
-                        Pji = Pij.transpose(1,2)   # [B, Mj, Mi]
-                        # zero‐out padded rows in source j (now rows of Sji)
-                        for b in range(batch_size):
-                            Pji[b, nj[b]:, :] = 0
-                        has_one_t   = (Pji.sum(dim=2) > 0)                      # [B, Mj]
-                        mask3d_t    = has_one_t.unsqueeze(-1).expand_as(Pji)    # [B, Mj, Mi]
-                        sims_flat_t = Sji.masked_select(mask3d_t).view(-1, Mi)  # [N_ji, Mi]
-                        y_flat_t    = Pji.masked_select(mask3d_t).view(-1, Mi)  # [N_ji, Mi]
-                        labels_r    = y_flat_t.argmax(dim=1)                    # [N_ji]
-                        all_sims.append(sims_flat_t)
-                        all_labels.append(labels_r)
-
+                        Sij = sim_list[c].clone()       # [B, Mi, Mj]
+                        Pij = perm_mat_list[c].clone()  # [B, Mi, Mj]
                         c += 1
 
-                # concatenate across all pairs & directions
-                sims_block   = torch.cat(all_sims,   dim=0)  # [N_total, M_max]
-                labels_block = torch.cat(all_labels, dim=0)  # [N_total]
+                        # zero-out padded rows in i
+                        for b in range(batch_size):
+                            Pij[b, ni[b]:, :] = 0
+
+                        has_one_i = (Pij.sum(dim=2) > 0)                             # [B, Mi]
+                        mask3d_i  = has_one_i.unsqueeze(-1).expand_as(Pij)           # [B, Mi, Mj]
+
+                        col_valid_j = (torch.arange(Mj, device=Sij.device).unsqueeze(0) < nj.unsqueeze(1))  # [B, Mj]
+                        col_valid_j = col_valid_j.unsqueeze(1).expand(-1, Mi, -1)                           # [B, Mi, Mj]
+
+                        sims_flat_i  = Sij.masked_select(mask3d_i).view(-1, Mj)           # [N_ij, Mj]
+                        pos_flat_i   = Pij.masked_select(mask3d_i).view(-1, Mj).float()   # [N_ij, Mj]
+                        valid_flat_i = col_valid_j.masked_select(mask3d_i).view(-1, Mj).float()
+
+                        rows_accum[i].append(sims_flat_i)
+                        pos_accum[i].append(pos_flat_i)
+                        valid_accum[i].append(valid_flat_i)
+
+                        Sji = Sij.transpose(1, 2)   # [B, Mj, Mi]
+                        Pji = Pij.transpose(1, 2)   # [B, Mj, Mi]
+
+                        for b in range(batch_size):
+                            Pji[b, nj[b]:, :] = 0
+
+                        has_one_j = (Pji.sum(dim=2) > 0)                               # [B, Mj]
+                        mask3d_j  = has_one_j.unsqueeze(-1).expand_as(Pji)             # [B, Mj, Mi]
+
+                        col_valid_i = (torch.arange(Mi, device=Sji.device).unsqueeze(0) < ni.unsqueeze(1))  # [B, Mi]
+                        col_valid_i = col_valid_i.unsqueeze(1).expand(-1, Mj, -1)                           # [B, Mj, Mi]
+
+                        sims_flat_j  = Sji.masked_select(mask3d_j).view(-1, Mi)         # [N_ji, Mi]
+                        pos_flat_j   = Pji.masked_select(mask3d_j).view(-1, Mi).float() # [N_ji, Mi]
+                        valid_flat_j = col_valid_i.masked_select(mask3d_j).view(-1, Mi).float()
+
+                        rows_accum[j].append(sims_flat_j)
+                        pos_accum[j].append(pos_flat_j)
+                        valid_accum[j].append(valid_flat_j)
+
+                rows, pos_rows, valid_rows = [], [], []
+                for i in range(K):
+                    if rows_accum[i]:  
+                        rows.append(torch.cat(rows_accum[i], dim=1))   # [N_i, sum_j Mj]
+                        pos_rows.append(torch.cat(pos_accum[i], dim=1))
+                        valid_rows.append(torch.cat(valid_accum[i], dim=1))
+
+                # concatenate across all i
+                sims_block  = torch.cat(rows, dim=0)  # [N_total, M_tot]
+                pos_mask    = torch.cat(pos_rows,dim=0)  # [N_total, M_tot]  
+                valid_mask  = torch.cat(valid_rows, dim=0) # [N_total, M_tot] 
             
-                loss = criterion(sims_block, labels_block, points_embeddings) # prototype_score
+                loss = criterion(sims_block, pos_mask, valid_mask, points_embeddings) 
                 loss = loss + layer_loss
                 loss.backward()
                 
