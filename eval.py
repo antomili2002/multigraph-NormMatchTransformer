@@ -168,22 +168,6 @@ def mgm_model_synchronizing(
         out.append((i, j, M))
     return out
 
-def f1_counts_from_row_argmax(pred_idx: torch.Tensor, gt_idx: torch.Tensor):
-    """
-    pred_idx, gt_idx: [ni, 1] long tensors with the predicted/true column index per row.
-    Returns TP, FP, FN as int64 tensors on the same device.
-
-    With one prediction & one GT per row:
-      - TP = #rows where pred == gt
-      - Every mistake creates one FP and one FN
-    """
-    correct = (pred_idx == gt_idx).squeeze(1)
-    tp = correct.sum().to(torch.int64)
-    wrong = (~correct).sum().to(torch.int64)
-    fp = wrong
-    fn = wrong
-    return tp, fp, fn
-
 def f1_from_counts(tp: torch.Tensor, fp: torch.Tensor, fn: torch.Tensor) -> torch.Tensor:
     eps = torch.tensor(1e-8, device=tp.device, dtype=torch.float32)
     tp = tp.to(torch.float32); fp = fp.to(torch.float32); fn = fn.to(torch.float32)
@@ -396,8 +380,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
         
         # f1_scores[i] = epoch_f1
         if verbose:
-            print(f"Class {cls} acc_pre_sync = {acc_pre_cls:.4f}, acc_post_sync = {acc_post_cls:.4f}")
-            #print(f"Avg inconsistent 3-cycles before sync: {avg_bad_pre:.2f}, after sync: {avg_bad_post:.2f}")
+            print(f"Class {cls} acc_pre_sync = {acc_pre_cls:.4f}, acc_post_sync = {acc_post_cls:.4f}, f1_score = {f1_pre_cls:.4f}")
             
         error_dist_dict[cls] = result_dict
         
@@ -442,7 +425,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
     for cls, pre_acc, post_acc, f1pre, f1post in zip(classes, accs_pre_sync, accs_post_sync, f1_scores_pre, f1_scores_post):
         print("{}: pre sync = {:.4f}, post sync = {:.4f} | f1_pre = {:.4f}, f1_post = {:.4f}".format(cls, pre_acc, post_acc, f1pre, f1post))
     print("average pre sync = {:.4f}, average after sync = {:.4f}".format(torch.mean(accs_pre_sync), torch.mean(accs_post_sync)))
-    print("Macro F1      pre = {:.4f}, post = {:.4f}".format(torch.mean(f1_scores_pre), torch.mean(f1_scores_post)))
+    print("Macro F1 pre = {:.4f}, post = {:.4f}".format(torch.mean(f1_scores_pre), torch.mean(f1_scores_post)))
     print("Micro (global) F1 pre = {:.4f}, post = {:.4f}".format(f1_micro_pre, f1_micro_post))
 
     return accs_pre_sync, accs_post_sync, error_dist_dict

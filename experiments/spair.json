@@ -1,8 +1,8 @@
 {
   "default_json": "experiments/voc_basic.json",
-  "BATCH_SIZE": 3,
+  "BATCH_SIZE": 5,
   "DATASET_NAME": "SPair71k",
-  "model_dir": "./results/spair/ar/",
+  "model_dir": "./results/voc_basic/NMT_3dSpline_posenc_SNN_k=2",
   "TRAIN": {
     "EPOCH_ITERS": 2000,
     "lr_schedule": "long_halving4",

@@ -48,7 +48,7 @@
     "reduced_vis": true
   },
   "evaluate_only": true,
-  "model_dir": "./results/voc_basic/NMT_3dSpline_posenc",
+  "model_dir": "./results/voc_basic/NMT_3dSpline_posenc_SNN",
   "log_dir": "runs/",
   "MODEL_ARCH": "NMT"
 }
