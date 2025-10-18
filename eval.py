@@ -17,163 +17,35 @@ from utils.config import cfg
 from utils.evaluation_metric import calculate_correct_and_valid, matching_accuracy_from_lists, perm_distance_masked
 from scipy.linalg import eigh
 
-def sinkhorn_logspace(
-    similarity: torch.Tensor,
-    epsilon: float = 0.035,
-    max_iter: int = 27
-) -> torch.Tensor:
-    """
-    Log-space Sinkhorn to convert a batch of similarity matrices into 
-    doubly-stochastic matrices.
-    
-    Args:
-        similarity: [batch_size, n, m] matrix of similarities
-        epsilon:    Entropic regularization (larger => smoother distribution)
-        max_iter:   Number of Sinkhorn iterations in log domain
-    
-    Returns:
-        [batch_size, n, m] doubly-stochastic matrix
-    """
-    log_Q = similarity / epsilon
+# Local utils
+from utils.mgm_utils import (
+    sinkhorn_logspace,
+    hard_perm_from_sink,
+    mgm_model_synchronizing,
+    MGMConfig,
+)
 
-    for _ in range(max_iter):
-        log_sum_rows = torch.logsumexp(log_Q, dim=2, keepdim=True)
-        log_Q = log_Q - log_sum_rows
-
-        log_sum_cols = torch.logsumexp(log_Q, dim=1, keepdim=True)
-        # broadcast subtraction
-        log_Q = log_Q - log_sum_cols
-
-    Q = torch.exp(log_Q)
-    return Q
-
-def hard_perm_from_sink(P_sink: torch.Tensor) -> torch.Tensor:
-    """
-    P_sink: Tensor [B, N, N]
-    returns P_pred: Tensor [B, N, N] each a valid permutation
-    """
-    B, N, T = P_sink.shape
-    P_pred = torch.zeros_like(P_sink)
-    cost = -P_sink.detach().cpu().numpy() # maximize P_sink
-    for b in range(B):
-        r, c = linear_sum_assignment(cost[b])
-        P_pred[b, r, c] = 1
-    return P_pred.to(P_sink.device)
-
-def symmetric_softmax_costs(Fi: torch.Tensor,
-                            Fj: torch.Tensor,
-                            tau: float = 0.07,
-                            eps: float = 1e-9) -> torch.Tensor:
-    """
-    Fi: [ni, d] embeddings for graph i
-    Fj: [nj, d] embeddings for graph j
-    Return: cost matrix C [ni, nj] where C = -log( 0.5*(softmax_row + softmax_col) )
-    """
-    S = Fi @ Fj.t()                      # [ni, nj]
-
-    # row-wise and column-wise softmax
-    P_row = torch.softmax(tau * S, dim=1)            # row dist
-    P_col = torch.softmax(tau * S.T, dim=1).T            # column dist
-
-    P_sym = 0.5 * (P_row + P_col)               # symmetrical probabilities
-    #P_sym = P_sym.clamp_min(eps).clamp_max(1 - eps)
-
-    # c = -log((1 + p) / (1 - p))
-    C = -torch.log( (1 + P_sym) / (1 - P_sym) )
-    return C
-
-def mgm_model_synchronizing(
-    sim_matrices,         # list of pairwise similarity tensors
-    n_points_gt_list,     # list of [B] #nodes
-    pairs,                # list of (i,j)
-    batch_idx: int,
-    embeds: list,         # list of [B, Ni, D] embedding tensors
-    sync: bool = False,
-    func: str = "logit",  # "cosine" | "logit" | "atanh" | "logsig" | "softmax"
-    tau: float = 0.15,
-):
-    """Return list[(i,j,match_mat_ij)] for a single Batch index."""
-    alpha = 2.0
-    eps   = 1e-8
-
-    mgm_model = pylibmgm.MgmModel()
-
-    for idx, (i, j) in enumerate(pairs):
-        ni = int(n_points_gt_list[i][batch_idx].item())
-        nj = int(n_points_gt_list[j][batch_idx].item())
-
-        if func == "softmax":
-            Fi = embeds[i][batch_idx]      # [ni, D]
-            Fj = embeds[j][batch_idx]      # [nj, D]
-            mat_np = symmetric_softmax_costs(Fi, Fj, tau=tau, eps=eps)  # [ni, nj]
-        else:
-            # start from cosine similarities
-            S  = sim_matrices[idx][batch_idx][:ni, :nj]      # [ni, nj]
-            mu = S.mean(-1, keepdim=True)
-            sigma = S.std(-1, keepdim=True) + 1e-8
-            S_z   = (S - mu) / sigma                         # z‑score per row
-            S_np  = S_z.cpu().numpy()
-
-            mat_np = np.empty_like(S_np)
-            for u in range(ni):
-                for v in range(nj):
-                    s = float(S_np[u, v])
-                    if func == "cosine":
-                        cost = -alpha * s
-                    elif func == "logit":
-                        x = max(-1 + eps, min(1 - eps, alpha * s))
-                        cost = -math.log((1 + x) / (1 - x))
-                    elif func == "atanh":
-                        x = max(-1 + eps, min(1 - eps, alpha * s))
-                        cost = -math.atanh(x)
-                    elif func == "logsig":
-                        cost = F.softplus(-alpha * torch.tensor(s)).item()
-                    else:
-                        raise ValueError(f"Unknown func '{func}'")
-                    mat_np[u, v] = cost
-
-        gm = pylibmgm.GmModel(
-            pylibmgm.Graph(i, ni),
-            pylibmgm.Graph(j, nj),
-            ni * nj,           # #unary
-            0                  # no quadratic edges yet
-        )
-
-        for u in range(ni):
-            for v in range(nj):
-                gm.add_assignment(u, v, float(mat_np[u, v]) - 100)
-
-        mgm_model.add_model(gm)
-        
-    sol = pylibmgm.solver.solve_mgm(
-        mgm_model,
-        opt_level=pylibmgm.solver.OptimizationLevel.DEFAULT
-    )
-
-    if sync:
-        sol = pylibmgm.solver.synchronize_solution(
-            mgm_model, sol, feasible=True, iterations=3,
-            opt_level=pylibmgm.solver.OptimizationLevel.DEFAULT
-        )
-        
-    out = []
-    for (i, j) in pairs:
-        labels = sol[(i, j)]
-        ni = int(n_points_gt_list[i][batch_idx].item())
-        nj = int(n_points_gt_list[j][batch_idx].item())
-        M  = np.zeros((ni, nj), dtype=np.int32)
-        for u, v in enumerate(labels):
-            if 0 <= v < nj:
-                M[u, v] = 1
-        out.append((i, j, M))
-    return out
+"""
+Evaluation and MGM utilities.
+Key heavy-lifting helpers were moved to utils.mgm_utils to keep this file focused.
+"""
 
 def f1_from_counts(tp: torch.Tensor, fp: torch.Tensor, fn: torch.Tensor) -> torch.Tensor:
-    eps = torch.tensor(1e-8, device=tp.device, dtype=torch.float32)
-    tp = tp.to(torch.float32); fp = fp.to(torch.float32); fn = fn.to(torch.float32)
-    prec = tp / (tp + fp + eps)
-    rec  = tp / (tp + fn + eps)
-    return 2 * prec * rec / (prec + rec + eps)
+    """Compute F1 from scalar (or tensor) counts.
+
+    Uses a tiny eps on the same device/dtype as inputs to avoid div-by-zero.
+    Returns a float tensor (same dtype as inputs cast to float).
+    """
+    # ensure float tensors on the same device
+    tp_f = tp.to(dtype=torch.float32, device=tp.device)
+    fp_f = fp.to(dtype=torch.float32, device=tp.device)
+    fn_f = fn.to(dtype=torch.float32, device=tp.device)
+    eps = torch.tensor(1e-8, dtype=tp_f.dtype, device=tp_f.device)
+
+    prec = tp_f / (tp_f + fp_f + eps)
+    rec = tp_f / (tp_f + fn_f + eps)
+    f1 = 2 * prec * rec / (prec + rec + eps)
+    return f1
 
 def f1_counts_from_perm(P_pred: torch.Tensor, P_gt: torch.Tensor):
     # P_pred, P_gt: [ni, nj], binary (0/1) – or threshold P_pred if soft.
@@ -186,6 +58,12 @@ def f1_counts_from_perm(P_pred: torch.Tensor, P_gt: torch.Tensor):
     return tp, fp, fn
 
 def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verbose=True):
+    """Evaluate the model on the provided dataloader.
+
+    - Computes pre- and post-sync matching accuracies and macro/micro F1.
+    - Uses Sinkhorn+Hungarian for pairwise predictions, and optional MGM post-processing.
+    - Logs results to Weights & Biases.
+    """
     print("Start evaluation...")
     since = time.time()
 
@@ -265,35 +143,37 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                     in_training       = False,
                 )
 
-            pred_perm_mats = []
-            for sim in sim_list:
-                P_sink = sinkhorn_logspace(sim)      # [B, Mi_max, Mj_max]
-                P_pred = hard_perm_from_sink(P_sink) # [B, Mi_max, Mj_max]
-                pred_perm_mats.append(P_pred)
+            # Build hard permutations for all pair similarities
+            pred_perm_mats = [
+                hard_perm_from_sink(sinkhorn_logspace(sim)) for sim in sim_list
+            ]
             
             # slice out invalid padding of perm_mats and pred_mats
             # Accumulate correct vs valid counts for pre-sync
             idx_c = 0
             correct_pre, valid_pre = 0.0, 0.0
             for g_i in range(K):
-                n_i = n_points_gt[g_i]
-                for g_j in range(g_i+1, K):
-                    n_j = n_points_gt[g_j]
+                for g_j in range(g_i + 1, K):
+                    # vectorize across batch by slicing valid submatrices per b
                     for b in range(batch_num):
-                        ni, nj = n_i[b].item(), n_j[b].item()
-                        Pp = pred_perm_mats[idx_c][b, :ni, :nj]       # [ni×nj]
-                        Pg = perm_mat_list[idx_c][b, :ni, :nj]       # [ni×nj]
-                        # row-wise argmax → predict & gt indices
-                        pred_idx = Pp.argmax(dim=1, keepdim=True)  # [ni,1]
-                        gt_idx   = Pg.argmax(dim=1, keepdim=True)  # [ni,1]
+                        ni = int(n_points_gt[g_i][b].item())
+                        nj = int(n_points_gt[g_j][b].item())
+                        Pp = pred_perm_mats[idx_c][b, :ni, :nj]
+                        Pg = perm_mat_list[idx_c][b, :ni, :nj]
+
+                        pred_idx = Pp.argmax(dim=1, keepdim=True)
+                        gt_idx = Pg.argmax(dim=1, keepdim=True)
                         c, v = calculate_correct_and_valid(pred_idx, gt_idx)
                         correct_pre += c
-                        valid_pre   += v
-                        
+                        valid_pre += v
+
                         tp_, fp_, fn_ = f1_counts_from_perm(Pp, Pg)
-                        tp_pre_cls  += tp_; fp_pre_cls  += fp_; fn_pre_cls  += fn_
-                        tp_pre_global += tp_; fp_pre_global += fp_; fn_pre_global += fn_
-                        
+                        tp_pre_cls += tp_
+                        fp_pre_cls += fp_
+                        fn_pre_cls += fn_
+                        tp_pre_global += tp_
+                        fp_pre_global += fp_
+                        fn_pre_global += fn_
                     idx_c += 1
             pre_acc_batch = (correct_pre / valid_pre)
             sum_pre_acc += pre_acc_batch
@@ -309,19 +189,15 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                     mat_b = mat_b_full[:ni, :nj].detach().cpu().numpy()
                     sim_list_b.append(mat_b.astype(np.float64))
                 
-                logger = logging.getLogger("libmgm")
-                logger.setLevel(logging.WARNING) # set log level of mgm model
-                
                 # create MgmModel, solve mgm and extract labelings
+                mgm_cfg = MGMConfig(func="logit", tau=0.05, sync=False)
                 all_matches_b = mgm_model_synchronizing(
-                    sim_matrices     = sim_list,
-                    n_points_gt_list = n_points_gt,
-                    pairs            = pairs,
-                    batch_idx        = b,
-                    embeds           = embeds,   
-                    sync             = False,     
-                    func             = "logit",
-                    tau              = 0.05
+                    sim_matrices=sim_list,
+                    n_points_gt_list=n_points_gt,
+                    pairs=pairs,
+                    batch_idx=b,
+                    embeds=embeds,
+                    mgm_config=mgm_cfg,
                 )
                 
                 # accumulate post-sync just like pre-sync
@@ -333,7 +209,7 @@ def eval_model(model, dataloader, local_rank, output_rank, eval_epoch=None, verb
                     P_post = torch.Tensor(Ps).to(device)
                     
                     pred_idx = P_post.argmax(dim=1, keepdim=True)
-                    gt_idx   = Pg.argmax(dim=1, keepdim=True)
+                    gt_idx = Pg.argmax(dim=1, keepdim=True)
                     c, v = calculate_correct_and_valid(pred_idx, gt_idx)
                     correct_post += c
                     valid_post += v
