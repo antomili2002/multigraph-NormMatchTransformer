@@ -259,7 +259,7 @@ class CrossAttention(nn.Module):
         dim: int,
         num_heads: int,
         device = None,
-        rope_inv_freq: torch.Tensor = None
+        theta: float = 10_000.0
     ):  
         super().__init__()
         self.device = (('cuda' if torch.cuda.is_available() else
@@ -268,11 +268,10 @@ class CrossAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads 
 
-        # Register rotary positional encoding frequencies
+        # Register rotary positional encoding inverse frequencies directly here
         assert (self.head_dim % 2) == 0, "RoPE requires even head_dim"
-        if rope_inv_freq is None:
-            raise ValueError("Pass rope_inv_freq (from PrecomputeRotaryFrequencies.inv_freq)")
-        self.register_buffer("rope_inv_freq", rope_inv_freq)  # [head_dim//2]
+        inv_freq = 1.0 / (theta ** (torch.arange(0, self.head_dim, 2, device=self.device).float() / self.head_dim))
+        self.register_buffer("rope_inv_freq", inv_freq)  # [head_dim//2]
         
         # Define linear projections for queries, keys, and values
         self.Wq = nn.Linear(dim, num_heads * self.head_dim, bias=False, device=self.device)
@@ -437,7 +436,7 @@ class Layer(nn.Module):
         attn (SelfAttention): Self-attention mechanism.
         mlp (MLP): Multilayer Perceptron for feedforward connection.
     """
-    def __init__(self, cfg, rope_inv_freq: torch.Tensor = None):
+    def __init__(self, cfg):
         super().__init__()
         self.device = (('cuda' if torch.cuda.is_available() else
                         'mps' if torch.backends.mps.is_available() else 'cpu')
@@ -451,7 +450,7 @@ class Layer(nn.Module):
             # but now i can't find the reference to that in the paper
 
         #EDIT
-        self.cross_attn = CrossAttention(cfg.dim, cfg.num_heads, self.device, rope_inv_freq = rope_inv_freq)
+        self.cross_attn = CrossAttention(cfg.dim, cfg.num_heads, self.device)
         self.alpha_C = Scale(cfg.dim, init = 0.05, scale = 1. / math.sqrt(cfg.dim), device=self.device) #init= 0.05
         
         #For Global feature information exchange
@@ -524,9 +523,7 @@ class NGPT_DECODER(nn.Module):
         # self.max_seq_len = cfg.max_seq_len
         # self.vocab_len = cfg.vocab_len
 
-        ### positional encodings
-        self.precompute_freqs = PrecomputeRotaryFrequencies(cfg.dim // cfg.num_heads, cfg.dim, device = self.device)
-        self.rope_inv_freq = self.precompute_freqs.inv_freq
+        ### positional encodings (no precompute needed for graph-id RoPE in cross-attn)
         
         # residual state initialization
         # self.token_embedder = nn.Embedding(self.vocab_len, cfg.dim, device=self.device)
@@ -536,7 +533,7 @@ class NGPT_DECODER(nn.Module):
             # False -> "mask this token" while True -> "Let the model see this token"
 
         # the model itself
-        self.layers = nn.ModuleList(Layer(cfg, self.rope_inv_freq) for _ in range(cfg.num_layers))
+        self.layers = nn.ModuleList(Layer(cfg) for _ in range(cfg.num_layers))
 
         # the output projection
         # self.output = nn.Linear(cfg.dim, self.vocab_len, bias=False, device=self.device)
@@ -638,9 +635,8 @@ class NGPT_DECODER(nn.Module):
         # creating our causal self-attention mask
         # mask = self.mask[:seq_len, :seq_len]
 
-        # precomputing our RoPE frequencies
-        freqs = self.rope_inv_freq
-            # dict {'sin': shape (1, max_seq_len, 1, head_dim), 'cos': shape (1, max_seq_len, 1, head_dim)}
+        # no positional RoPE used in SelfAttention; pass None
+        freqs = None
       
         # initializing the first residual state
         # x = self.token_embedder(source_nodes) # (batch_size, seq_len, dim)
