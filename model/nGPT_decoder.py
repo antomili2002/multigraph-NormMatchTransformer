@@ -258,8 +258,9 @@ class CrossAttention(nn.Module):
         self, 
         dim: int,
         num_heads: int,
-        device = None
-    ):
+        device = None,
+        rope_inv_freq: torch.Tensor = None
+    ):  
         super().__init__()
         self.device = (('cuda' if torch.cuda.is_available() else
                         'mps' if torch.backends.mps.is_available() else 'cpu')
@@ -267,6 +268,12 @@ class CrossAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads 
 
+        # Register rotary positional encoding frequencies
+        assert (self.head_dim % 2) == 0, "RoPE requires even head_dim"
+        if rope_inv_freq is None:
+            raise ValueError("Pass rope_inv_freq (from PrecomputeRotaryFrequencies.inv_freq)")
+        self.register_buffer("rope_inv_freq", rope_inv_freq)  # [head_dim//2]
+        
         # Define linear projections for queries, keys, and values
         self.Wq = nn.Linear(dim, num_heads * self.head_dim, bias=False, device=self.device)
         self.Wk = nn.Linear(dim, num_heads * self.head_dim, bias=False, device=self.device)
@@ -283,10 +290,28 @@ class CrossAttention(nn.Module):
         # this flag designates Wo to have a different parameter initialization as defined below in Model
         self.Wo.GPT_scale_init = 1
 
+    def _apply_graph_rope(self, x: torch.Tensor, gid: torch.Tensor) -> torch.Tensor:
+        """
+            x:   [B, L, H, D]  (queries or keys)
+            gid: [B, L]        integer graph index per token
+            returns: rotated x (same shape)
+        """
+        B, L, H, D = x.shape
+        half = D // 2
+        # θ = gid * inv_freq ; shape broadcast to [B, L, 1, half]
+        theta = gid.float().unsqueeze(-1).unsqueeze(-1) * self.rope_inv_freq.view(1, 1, 1, half)
+        sin, cos = torch.sin(theta), torch.cos(theta)
+        x1, x2 = x[..., :half], x[..., half:]
+        xr1 = x1 * cos - x2 * sin
+        xr2 = x1 * sin + x2 * cos
+        return torch.cat([xr1, xr2], dim=-1)
+    
     def forward(self,
         x: torch.Tensor,
         memory: torch.Tensor,
-        padding_mask
+        padding_mask,
+        gid_src: torch.Tensor = None, 
+        gid_mem: torch.Tensor = None
     ) -> torch.Tensor:
         """
         Forward pass for the self-attention module.
@@ -312,10 +337,8 @@ class CrossAttention(nn.Module):
         v = v.view(batch_size, mem_len, self.num_heads, self.head_dim)
 
         # applying RoPE
-        # sin = freqs['sin'][:, :seq_len, :, :].to(self.device) 
-        # cos = freqs['cos'][:, :seq_len, :, :].to(self.device) # (1, seq_len, 1, head_dim // 2)
-        # q = self.apply_rotary_pos_emb(q, sin, cos) # no shape change
-        # k = self.apply_rotary_pos_emb(k, sin, cos)
+        if gid_src is not None: q = self._apply_graph_rope(q, gid_src)
+        if gid_mem is not None: k = self._apply_graph_rope(k, gid_mem)
 
         # normalizing & scaling our queries  & keys (see page 4)
         s_qk = self.s_qk() # (num_heads, head_dim)
@@ -414,7 +437,7 @@ class Layer(nn.Module):
         attn (SelfAttention): Self-attention mechanism.
         mlp (MLP): Multilayer Perceptron for feedforward connection.
     """
-    def __init__(self, cfg):
+    def __init__(self, cfg, rope_inv_freq: torch.Tensor = None):
         super().__init__()
         self.device = (('cuda' if torch.cuda.is_available() else
                         'mps' if torch.backends.mps.is_available() else 'cpu')
@@ -428,7 +451,7 @@ class Layer(nn.Module):
             # but now i can't find the reference to that in the paper
 
         #EDIT
-        self.cross_attn = CrossAttention(cfg.dim, cfg.num_heads, self.device)
+        self.cross_attn = CrossAttention(cfg.dim, cfg.num_heads, self.device, rope_inv_freq = rope_inv_freq)
         self.alpha_C = Scale(cfg.dim, init = 0.05, scale = 1. / math.sqrt(cfg.dim), device=self.device) #init= 0.05
         
         #For Global feature information exchange
@@ -443,7 +466,8 @@ class Layer(nn.Module):
         
         self.layerLoss = LayerLoss(cfg.layer_loss_param)
         
-    def forward(self, h: torch.Tensor, m: torch.Tensor, padding_mask, freqs, is_eval) -> torch.Tensor: #freqs: dict, 
+    def forward(self, h: torch.Tensor, m: torch.Tensor, padding_mask, freqs, is_eval,
+                graph_ids_source: torch.Tensor = None, graph_ids_memory: torch.Tensor = None) -> torch.Tensor: #freqs: dict,
         """
         Forward pass of the Layer module.
 
@@ -467,7 +491,7 @@ class Layer(nn.Module):
         # print("--------------------------------")
         
         #EDIT
-        h_C = cosine_norm(self.cross_attn(h, m, padding_mask))#freqs, 
+        h_C = cosine_norm(self.cross_attn(h, m, padding_mask, graph_ids_source, graph_ids_memory))#freqs, 
         h = cosine_norm(h + self.alpha_C() * (h_C - h))
         
         
@@ -502,7 +526,8 @@ class NGPT_DECODER(nn.Module):
 
         ### positional encodings
         self.precompute_freqs = PrecomputeRotaryFrequencies(cfg.dim // cfg.num_heads, cfg.dim, device = self.device)
-
+        self.rope_inv_freq = self.precompute_freqs.inv_freq
+        
         # residual state initialization
         # self.token_embedder = nn.Embedding(self.vocab_len, cfg.dim, device=self.device)
 
@@ -511,7 +536,7 @@ class NGPT_DECODER(nn.Module):
             # False -> "mask this token" while True -> "Let the model see this token"
 
         # the model itself
-        self.layers = nn.ModuleList(Layer(cfg) for _ in range(cfg.num_layers))
+        self.layers = nn.ModuleList(Layer(cfg, self.rope_inv_freq) for _ in range(cfg.num_layers))
 
         # the output projection
         # self.output = nn.Linear(cfg.dim, self.vocab_len, bias=False, device=self.device)
@@ -597,6 +622,8 @@ class NGPT_DECODER(nn.Module):
         padding_mask,
         encoder_output: torch.Tensor = None,
         is_eval = False,
+        graph_ids_source: torch.Tensor = None,
+        graph_ids_memory: torch.Tensor = None
     ) -> (torch.Tensor):
         """
         Our N-GPT's primary forward function that calls all the other modules
@@ -612,7 +639,7 @@ class NGPT_DECODER(nn.Module):
         # mask = self.mask[:seq_len, :seq_len]
 
         # precomputing our RoPE frequencies
-        freqs = self.precompute_freqs() 
+        freqs = self.rope_inv_freq
             # dict {'sin': shape (1, max_seq_len, 1, head_dim), 'cos': shape (1, max_seq_len, 1, head_dim)}
       
         # initializing the first residual state
@@ -621,24 +648,15 @@ class NGPT_DECODER(nn.Module):
         loss = torch.zeros(1, requires_grad=True, device=x.device)
         # run through the model's layers
         for layer in self.layers:
-            x, loss_ = layer(x, encoder_output, padding_mask, freqs, is_eval)
+            x, loss_ = layer(x, 
+                             encoder_output, 
+                             padding_mask, 
+                             freqs, 
+                             is_eval,
+                             graph_ids_source, 
+                             graph_ids_memory)
             loss = loss + loss_
         
         # the final output of the model
         logits = x#self.output(x) # (batch_size, seq_len, vocab_len)
-        
-        
         return logits, loss
-        # to un-limit the temperature of the final probability distribution (see page 2)
-        
-        #EDIT
-        # scaled_logits = logits * self.s_z()
-        
-        # loss = None
-        # if target_token_ids is not None: # if we're training, calculate the loss
-        #     loss = self.criterion(
-        #         scaled_logits.view(batch_size * seq_len, self.vocab_len),
-        #         target_token_ids.reshape(batch_size * seq_len)
-        #     )
-
-        # return logits, loss

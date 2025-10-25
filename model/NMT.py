@@ -276,15 +276,14 @@ class NMT(utils.backbone.VGG16_bn):
 
             if cfg.Matching_TF.pos_encoding:
                 h_res = h_res + self.pos_encoding(p)
-                gid = torch.full((batch_size, h_res.size(1)), graph_idx, dtype=torch.long, device=h_res.device)
-                h_res = h_res + self.graph_embed(gid)
+                #gid = torch.full((batch_size, h_res.size(1)), graph_idx, dtype=torch.long, device=h_res.device)
+                #h_res = h_res + self.graph_embed(gid)
                 
             global_feature = self.final_layers(edges)[0].reshape((nodes.shape[0], -1))
             global_feature = self.glob_to_node_dim(global_feature)
             global_feature = global_feature + self.cls_enc
             global_feature = global_feature.unsqueeze(1).expand(-1,1, -1)
             global_feats.append(global_feature)
-            
             
             h_res = torch.cat([global_feature, h_res], dim=1)
 
@@ -318,9 +317,9 @@ class NMT(utils.backbone.VGG16_bn):
             src_pm = padded_mask[i]    # [B, M, M]
 
             # memory features & valid mask for all j != i
-            other_h   = [padded[j]   for j in range(K) if j!=i]
+            other_h   = [padded[j] for j in range(K) if j!=i]
             H_mem     = torch.cat(other_h, dim=1)  # [B, (K-1)M, D]
-            other_val = [padded_mask[j]  for j in range(K) if j!=i]
+            other_val = [padded_mask[j] for j in range(K) if j!=i]
             mem_valid = torch.cat(other_val, dim=1) # [B, (K-1)M]
 
             # rectangular cross-attention ban-mask [B, M, (K-1)M]
@@ -328,10 +327,28 @@ class NMT(utils.backbone.VGG16_bn):
             mem_inv   = ~mem_valid              # [B, (K-1)M]
             cross_mask= src_inv.unsqueeze(2) | mem_inv.unsqueeze(1) # [B, M, 1] OR [B, 1, (K-1)M]
 
+            B = src_h.size(0)
+            M = src_h.size(1) # padded length (includes your [CLS]-like global token)
+            device = src_h.device
+
+            # graph ids for the source tokens (all positions belong to graph i)
+            gid_src = torch.full((B, M), i, dtype=torch.long, device=device)
+
+            # graph ids for the memory tokens, concatenated in the same order as H_mem
+            mem_ids = []
+            for j in range(K):
+                if j == i:
+                    continue
+                Mj = padded[j].size(1) # padded length for graph j (same M)
+                mem_ids.append(torch.full((B, Mj), j, dtype=torch.long, device=device))
+            gid_mem = torch.cat(mem_ids, dim=1) # [B, (K-1)M]
+            
             out_i, loss_i = self.n_gpt_decoder(
                 source_nodes=src_h,
                 padding_mask=cross_mask,
-                encoder_output=H_mem
+                encoder_output=H_mem,
+                graph_ids_source=gid_src, # graph ids for source tokens
+                graph_ids_memory=gid_mem, # graph ids for memory tokens
             )
             #out_i = out_i * (1.0 / math.sqrt(K)) # scale using K graphs
             total_layer_loss += loss_i        
