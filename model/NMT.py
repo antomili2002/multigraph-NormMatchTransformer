@@ -16,7 +16,7 @@ from utils.utils import lexico_iter
 from utils.evaluation_metric import make_perm_mat_pred
 from utils.visualization import easy_visualize
 from model.nGPT_decoder import NGPT_DECODER
-from model.nGPT_encoder import NGPT_ENCODER
+from model.set_transformer import FusedMemoryBuilder
 
 
 def normalize_over_channels(x):
@@ -148,8 +148,17 @@ class NMT(utils.backbone.VGG16_bn):
         nGPT_decoder_config.mlp_hidden_mult = cfg.Matching_TF.nGPT_mlp_hidden_mult
         
         # add token-type embedding like BERT for graphs embeddings to let decoder know from which graph the attention comes
-        self.graph_embed = nn.Embedding(cfg.TRAIN.num_graphs_in_matching_instance, cfg.Matching_TF.d_model) 
-        
+        #self.graph_embed = nn.Embedding(cfg.TRAIN.num_graphs_in_matching_instance, cfg.Matching_TF.d_model) 
+        self.fused_mem = FusedMemoryBuilder(
+            dim=cfg.Matching_TF.d_model,
+            num_heads=cfg.Matching_TF.n_head,
+            k_seeds=cfg.Matching_TF.k_seeds,
+            use_isab=cfg.Matching_TF.use_isab,
+            m_inds=cfg.Matching_TF.m_inds,
+            ln=cfg.Matching_TF.ln,
+            num_layers=cfg.Matching_TF.set_transformer_num_layers,
+        )
+
         self.n_gpt_decoder = NGPT_DECODER(nGPT_decoder_config)
         self.n_gpt_decoder_2 = NGPT_DECODER(nGPT_decoder_config)
         
@@ -310,43 +319,28 @@ class NMT(utils.backbone.VGG16_bn):
             padded.append(h_p), padded_mask.append(valid_p)
             
         total_layer_loss = 0.0
+        S_mem, valid_mem, gid_mem = self.fused_mem(padded, padded_mask, return_gid=True)
         embeddings = []
         for i in range(K):
             # source = graph i
             src_h  = padded[i]       # [B, M, D]
             src_pm = padded_mask[i]    # [B, M, M]
 
-            # memory features & valid mask for all j != i
-            other_h   = [padded[j] for j in range(K) if j!=i]
-            H_mem     = torch.cat(other_h, dim=1)  # [B, (K-1)M, D]
-            other_val = [padded_mask[j] for j in range(K) if j!=i]
-            mem_valid = torch.cat(other_val, dim=1) # [B, (K-1)M]
-
-            # rectangular cross-attention ban-mask [B, M, (K-1)M]
-            src_inv   = ~src_pm             # [B, M]
-            mem_inv   = ~mem_valid              # [B, (K-1)M]
-            cross_mask= src_inv.unsqueeze(2) | mem_inv.unsqueeze(1) # [B, M, 1] OR [B, 1, (K-1)M]
-
+            cross_mask = (~src_pm).unsqueeze(2) | (~valid_mem).unsqueeze(1)  # [B, M, 1] OR [B, 1, K*k]
+            owner_mask = (gid_mem == i).unsqueeze(1)  # [B, 1, K*k]
+            cross_mask = cross_mask | owner_mask  # ban attention to own graph's memory tokens
+            
             B = src_h.size(0)
             M = src_h.size(1) # padded length (includes your [CLS]-like global token)
             device = src_h.device
 
             # graph ids for the source tokens (all positions belong to graph i)
             gid_src = torch.full((B, M), i, dtype=torch.long, device=device)
-
-            # graph ids for the memory tokens, concatenated in the same order as H_mem
-            mem_ids = []
-            for j in range(K):
-                if j == i:
-                    continue
-                Mj = padded[j].size(1) # padded length for graph j (same M)
-                mem_ids.append(torch.full((B, Mj), j, dtype=torch.long, device=device))
-            gid_mem = torch.cat(mem_ids, dim=1) # [B, (K-1)M]
             
             out_i, loss_i = self.n_gpt_decoder(
                 source_nodes=src_h,
                 padding_mask=cross_mask,
-                encoder_output=H_mem,
+                encoder_output=S_mem,       # cross-attention now O(B * H * M * (Kk)) instead of O(B * H * M * (K-1)M) 
                 graph_ids_source=gid_src, # graph ids for source tokens
                 graph_ids_memory=gid_mem, # graph ids for memory tokens
             )

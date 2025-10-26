@@ -20,6 +20,11 @@
     "batch_norm": true,
     "global_feat": true,
     "pos_encoding": true,
+    "k_seeds": 4,
+    "use_isab": true,
+    "m_inds": 128,
+    "ln": false,
+    "set_transformer_num_layers": 3,
     "n_lap_EigVec": 8
   },
   "train_sampling": "intersection",
@@ -47,8 +52,8 @@
   "visualization_params": {
     "reduced_vis": true
   },
-  "evaluate_only": true,
-  "model_dir": "./results/voc_basic/NMT_3dSpline_posenc_SNN",
+  "evaluate_only": false,
+  "model_dir": "./results/voc_basic/NMT_3dSpline_RoPe_SNN_SetTransformer_intersection/",
   "log_dir": "runs/",
   "MODEL_ARCH": "NMT"
 }
